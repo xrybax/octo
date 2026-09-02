@@ -35,6 +35,13 @@ public sealed class ExternalSearchService
     public const int BuildSize = 60;
 
     /// <summary>
+    /// A normal Subsonic search page asks for 20 songs. Artist top-tracks is therefore
+    /// only a fallback for a genuinely thin track.search response, not a mandatory
+    /// second Last.fm request just to grow an already useful 50 rows to 60.
+    /// </summary>
+    private const int TopTracksFallbackThreshold = 20;
+
+    /// <summary>
     /// Deadline for one build. Last.fm has no configured HTTP timeout of its own, so
     /// without this a single hung call would pin the query for every joined caller.
     /// </summary>
@@ -118,11 +125,12 @@ public sealed class ExternalSearchService
                 if (collected.Count >= BuildSize) break;
             }
 
-            if (collected.Count < BuildSize)
+            if (collected.Count < TopTracksFallbackThreshold)
             {
                 // Use the first track-search hit's artist as the canonical anchor
-                // for top-tracks padding. Falls back to the raw query string when
-                // track.search came back empty.
+                // for top-tracks fallback. Falls back to the raw query string when
+                // track.search came back empty. Fill up to BuildSize once the fallback
+                // is needed, but do not make this second HTTP request for a healthy page.
                 var anchor = tracks.Count > 0 ? tracks[0].Artist : query;
                 var topTracks = await _lastFm.GetArtistTopTracksAsync(anchor, BuildSize * 2);
                 foreach (var t in topTracks)
@@ -147,30 +155,20 @@ public sealed class ExternalSearchService
             placeholdersMs = stageWatch.ElapsedMilliseconds;
             _logger.LogInformation("External search '{Q}' -> {N} placeholder songs", query, songs.Count);
 
-            // Album/art/duration from Deezer, then the ACCURATE duration for the top of
-            // the list from the real YouTube video. Release year stays lazy because it
-            // would add one extra Deezer request for every foreground row.
+            // Album/art/duration from Deezer. Release year stays lazy because it would
+            // add one extra Deezer request for every foreground row.
             stage = "deezer";
             stageWatch.Restart();
             await _metadata.EnrichExternalSongsAsync(songs, ct);
             deezerMs = stageWatch.ElapsedMilliseconds;
 
-            stage = "youtube";
-            stageWatch.Restart();
-            await _metadata.ResolveTopDurationsAsync(songs, ct);
-            youtubeMs = stageWatch.ElapsedMilliseconds;
-
-            // Fire-and-forget: pre-resolve YouTube videoIds for the top hits so the first
-            // /rest/stream click doesn't pay the cold yt-dlp double-call cost (ytsearch1: + -g,
-            // 6-16s combined). Arpeggi cancels at ~10s and falls back to a local song; without
-            // this, external playback is unreachable from that client. 12 is about what fits on
-            // the first page of search results.
-            //
-            // It runs LAST on purpose. It used to run before enrichment, where it wrote a
-            // videoId chosen with no duration hint while ResolveTopDurationsAsync was choosing
-            // a different one using the Deezer duration — so for the top rows the two raced and
-            // the loser could leave a song advertising the length of a video that would not be
-            // the one played.
+            // YouTube is deliberately outside the response's critical path. The Deezer
+            // duration is accurate enough to render search results; resolving the exact
+            // YouTube upload synchronously imposed a ~2.3 s floor even on a healthy shim.
+            // Prewarm updates routing only, so the frozen Song list remains safe to
+            // serialize while video ids and stream URLs are prepared in the background.
+            stage = "youtube-background";
+            youtubeMs = 0;
             _ = _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
 
             stage = "done";
@@ -194,7 +192,7 @@ public sealed class ExternalSearchService
             }
 
             _logger.LogInformation(
-                "External search timing '{Q}': outcome={Outcome} stopped_at={Stage} lastfm_ms={LastFmMs} placeholders_ms={PlaceholdersMs} deezer_ms={DeezerMs} youtube_ms={YouTubeMs} total_ms={TotalMs} songs={Songs}",
+                "External search timing '{Q}': outcome={Outcome} stopped_at={Stage} lastfm_ms={LastFmMs} placeholders_ms={PlaceholdersMs} deezer_ms={DeezerMs} youtube_ms={YouTubeMs} youtube_mode=background total_ms={TotalMs} songs={Songs}",
                 query,
                 outcome,
                 stage,
