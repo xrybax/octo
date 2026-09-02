@@ -53,6 +53,12 @@ jobs:
 
       - name: Test
         run: dotnet test --configuration Release --no-build --verbosity normal
+        env:
+          # WebApplicationFactory occasionally needs more than its default five
+          # minutes to observe the real Program entry point on hosted runners. Keep
+          # the image workflow aligned with CI so the same integration suite does
+          # not become flaky only when building a test image.
+          DOTNET_HOST_FACTORY_RESOLVER_DEFAULT_TIMEOUT_IN_SECONDS: "600"
 
   docker:
     needs: build-and-test
