@@ -148,6 +148,94 @@ public class DeezerMetadataServiceTests
     }
 
     [Fact]
+    public async Task SearchArtistsAsync_MapsStableIdImageAndAlbumCount()
+    {
+        var json = @"{""data"":[
+            {""id"":399,""name"":""Radiohead"",""nb_album"":42,
+             ""picture_xl"":""https://cdn/radiohead.jpg""},
+            {""id"":400,""name"":""Radio Head"",""nb_album"":3}
+        ]}";
+        var svc = BuildService(new() { ["/search/artist"] = json });
+
+        var artists = await svc.SearchArtistsAsync("Radiohead", 5);
+
+        Assert.Equal(2, artists.Count);
+        Assert.Equal("399", artists[0].DeezerId);
+        Assert.Equal("Radiohead", artists[0].Name);
+        Assert.Equal("https://cdn/radiohead.jpg", artists[0].ImageUrl);
+        Assert.Equal(42, artists[0].AlbumCount);
+    }
+
+    [Fact]
+    public async Task GetArtistAlbumsAsync_KeepsAlbumsEpsAndSingles()
+    {
+        // Artist browsing is deliberately different from global album search: singles
+        // are part of a discography and must not be filtered out.
+        var json = @"{""total"":3,""data"":[
+            {""id"":1,""title"":""LP"",""record_type"":""album"",""nb_tracks"":10,
+             ""release_date"":""2020-01-02"",""cover_xl"":""https://cdn/lp.jpg""},
+            {""id"":2,""title"":""Small EP"",""record_type"":""ep"",""nb_tracks"":4,
+             ""release_date"":""2021-03-04""},
+            {""id"":3,""title"":""One Song"",""record_type"":""single"",""nb_tracks"":1,
+             ""release_date"":""2022-05-06""}
+        ]}";
+        var svc = BuildService(new() { ["/artist/399/albums"] = json });
+
+        var albums = await svc.GetArtistAlbumsAsync("399", "Radiohead");
+
+        Assert.Equal(3, albums.Count);
+        Assert.Equal(new[] { "album", "ep", "single" }, albums.Select(a => a.RecordType!));
+        Assert.Equal(new int?[] { 2020, 2021, 2022 }, albums.Select(a => a.Year));
+        Assert.All(albums, album =>
+        {
+            Assert.Equal("Radiohead", album.Artist);
+            Assert.Equal("399", album.ArtistDeezerId);
+        });
+    }
+
+    [Fact]
+    public async Task GetArtistAlbumsAsync_FollowsPagination()
+    {
+        var pageOne = @"{""total"":101,""data"":[" + string.Join(",",
+            Enumerable.Range(1, 100).Select(i =>
+                $@"{{""id"":{i},""title"":""Release {i}"",""record_type"":""album""}}")) + "]}";
+        var pageTwo = @"{""total"":101,""data"":[
+            {""id"":101,""title"":""Release 101"",""record_type"":""single""}
+        ]}";
+        var svc = BuildService(new()
+        {
+            ["index=0"] = pageOne,
+            ["index=100"] = pageTwo,
+        });
+
+        var albums = await svc.GetArtistAlbumsAsync("399", "Radiohead", 101);
+
+        Assert.Equal(101, albums.Count);
+        Assert.Equal("101", albums[^1].DeezerId);
+    }
+
+    [Fact]
+    public async Task GetArtistAlbumsAsync_ThrottledLaterPage_DoesNotCachePartialList()
+    {
+        var pageOne = @"{""total"":101,""data"":[" + string.Join(",",
+            Enumerable.Range(1, 100).Select(i =>
+                $@"{{""id"":{i},""title"":""Release {i}"",""record_type"":""album""}}")) + "]}";
+        const string pageTwo = @"{""total"":101,""data"":[
+            {""id"":101,""title"":""Release 101"",""record_type"":""single""}
+        ]}";
+        var svc = BuildSequencedService(new()
+        {
+            ("index=0", new[] { pageOne }),
+            ("index=100", new[] { QuotaEnvelope, pageTwo }),
+        }, out _);
+
+        Assert.Empty(await svc.GetArtistAlbumsAsync("399", "Radiohead", 101));
+
+        var recovered = await svc.GetArtistAlbumsAsync("399", "Radiohead", 101);
+        Assert.Equal(101, recovered.Count);
+    }
+
+    [Fact]
     public async Task GetAlbumDetailAsync_OrdersByDiscThenTrackPosition()
     {
         // Arrange: deliberately out of order, spanning two discs.

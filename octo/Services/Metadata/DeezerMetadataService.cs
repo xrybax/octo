@@ -21,16 +21,21 @@ public class DeezerMetadataService : IDisposable
         string? ArtistName, string? ArtistImageUrl);
     public record ArtistMeta(string? Name, string? ImageUrl);
 
+    /// <summary>One artist catalog match. DeezerId is kept server-side and later
+    /// translated to Octo's short, client-safe id by SoulseekMetadataService.</summary>
+    public record ArtistHit(string DeezerId, string Name, string? ImageUrl, int? AlbumCount);
+
     /// <summary>Everything Deezer knows about a track, for writing rich file tags.</summary>
     public record FullTrackMeta(
         string? AlbumTitle, string? AlbumCoverUrl, int? Year, int? Duration, string? ArtistName,
         int? TrackNumber, int? DiscNumber, string? Isrc, int? TotalTracks, string? Genre,
         string? Label, string? ReleaseDate);
 
-    /// <summary>One album from a catalog search. Year is not on the search payload;
-    /// the detail call fills it.</summary>
+    /// <summary>One album from catalog search or an artist discography. The latter
+    /// normally includes a release date, while global search may leave Year unknown.</summary>
     public record AlbumHit(string DeezerId, string Title, string Artist,
-        string? CoverUrl, int? Year, int TrackCount, string? RecordType);
+        string? CoverUrl, int? Year, int TrackCount, string? RecordType,
+        string? ArtistDeezerId = null);
 
     /// <summary>One track of an album, with the real length and position.</summary>
     public record AlbumTrack(string Title, string Artist, int? Duration,
@@ -285,6 +290,139 @@ public class DeezerMetadataService : IDisposable
         return meta;
     }
 
+    /// <summary>Search artists without touching any audio endpoint. Unlike
+    /// <see cref="EnrichArtistAsync"/>, this retains the Deezer id required to request
+    /// the complete discography later.</summary>
+    public async Task<List<ArtistHit>> SearchArtistsAsync(string query, int limit,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query) || limit <= 0) return new List<ArtistHit>();
+
+        limit = Math.Min(limit, 100);
+        var key = $"ars|{query}|{limit}".ToLowerInvariant();
+        if (TryGetCached<List<ArtistHit>>(key, out var cached)) return cached!;
+
+        var hits = new List<ArtistHit>();
+        try
+        {
+            var q = Uri.EscapeDataString(query);
+            using var r = await GetJsonAsync($"{Base}/search/artist?q={q}&limit={limit}", ct);
+            if (r.Transient) return new List<ArtistHit>();
+            if (r.Doc is not null
+                && r.Doc.RootElement.TryGetProperty("data", out var data)
+                && data.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var a in data.EnumerateArray())
+                {
+                    var id = Identifier(a, "id");
+                    var name = Str(a, "name");
+                    if (id is null || string.IsNullOrWhiteSpace(name)) continue;
+
+                    hits.Add(new ArtistHit(
+                        id,
+                        name,
+                        Str(a, "picture_xl") ?? Str(a, "picture_big") ?? Str(a, "picture_medium"),
+                        Int(a, "nb_album")));
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("deezer artist search '{Q}' failed: {M}", query, ex.Message);
+        }
+
+        Put(key, hits, hits.Count == 0 ? NegativeTtl : PositiveTtl);
+        return hits;
+    }
+
+    /// <summary>
+    /// Fetch every release Deezer exposes for an artist, including singles and EPs.
+    /// This is metadata-only: album tracklists remain lazy and are fetched only when a
+    /// user opens a release. Pagination is bounded so a pathological catalog cannot
+    /// monopolize the shared Deezer request budget.
+    /// </summary>
+    public async Task<List<AlbumHit>> GetArtistAlbumsAsync(string deezerArtistId,
+        string? artistName, int limit = 500, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(deezerArtistId) || limit <= 0) return new List<AlbumHit>();
+
+        limit = Math.Min(limit, 500);
+        var key = $"ard|{deezerArtistId}|{artistName}|{limit}".ToLowerInvariant();
+        if (TryGetCached<List<AlbumHit>>(key, out var cached)) return cached!;
+
+        const int pageSize = 100;
+        var hits = new List<AlbumHit>();
+        var offset = 0;
+
+        try
+        {
+            while (hits.Count < limit)
+            {
+                var take = Math.Min(pageSize, limit - hits.Count);
+                using var r = await GetJsonAsync(
+                    $"{Base}/artist/{Uri.EscapeDataString(deezerArtistId)}/albums?limit={take}&index={offset}", ct);
+
+                // A later page can be throttled even when page one succeeded. Returning
+                // and caching that prefix would make a partial discography look complete.
+                if (r.Transient) return new List<AlbumHit>();
+                if (r.Doc is null
+                    || !r.Doc.RootElement.TryGetProperty("data", out var data)
+                    || data.ValueKind != JsonValueKind.Array)
+                    break;
+
+                var rowCount = data.GetArrayLength();
+                foreach (var a in data.EnumerateArray())
+                {
+                    var id = Identifier(a, "id");
+                    var title = Str(a, "title");
+                    if (id is null || string.IsNullOrWhiteSpace(title)) continue;
+
+                    var nestedArtist = a.TryGetProperty("artist", out var art) ? Str(art, "name") : null;
+                    var nestedArtistId = a.TryGetProperty("artist", out art) ? Identifier(art, "id") : null;
+                    var releaseDate = Str(a, "release_date");
+                    int? year = null;
+                    if (!string.IsNullOrEmpty(releaseDate)
+                        && releaseDate.Length >= 4
+                        && int.TryParse(releaseDate[..4], out var parsedYear))
+                        year = parsedYear;
+
+                    hits.Add(new AlbumHit(
+                        id,
+                        title,
+                        nestedArtist ?? artistName ?? "",
+                        Str(a, "cover_xl") ?? Str(a, "cover_big") ?? Str(a, "cover_medium"),
+                        year,
+                        Int(a, "nb_tracks") ?? 0,
+                        Str(a, "record_type"),
+                        nestedArtistId ?? deezerArtistId));
+                }
+
+                offset += rowCount;
+                var total = Int(r.Doc.RootElement, "total");
+                if (rowCount == 0
+                    || (total is int n && offset >= n)
+                    || (total is null && rowCount < take))
+                    break;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("deezer artist albums {Id} failed: {M}", deezerArtistId, ex.Message);
+            return new List<AlbumHit>();
+        }
+
+        // The API can repeat a release across page boundaries while its catalog is
+        // changing. Deezer id is the authoritative identity here.
+        hits = hits
+            .GroupBy(a => a.DeezerId, StringComparer.Ordinal)
+            .Select(g => g.First())
+            .Take(limit)
+            .ToList();
+
+        Put(key, hits, hits.Count == 0 ? NegativeTtl : PositiveTtl);
+        return hits;
+    }
+
     /// <summary>Search the album catalog. Single-track "albums" are dropped: a plain
     /// artist query returns a lot of them and they crowd out real records.</summary>
     public async Task<List<AlbumHit>> SearchAlbumsAsync(string query, int limit, CancellationToken ct = default)
@@ -308,8 +446,7 @@ public class DeezerMetadataService : IDisposable
                 // Materialize everything before the JsonDocument is disposed.
                 foreach (var a in data.EnumerateArray())
                 {
-                    var id = a.TryGetProperty("id", out var aid) && aid.ValueKind == JsonValueKind.Number
-                        ? aid.GetInt64().ToString() : null;
+                    var id = Identifier(a, "id");
                     var title = Str(a, "title");
                     if (id is null || string.IsNullOrWhiteSpace(title)) continue;
 
@@ -319,10 +456,17 @@ public class DeezerMetadataService : IDisposable
                         continue;
 
                     var artist = a.TryGetProperty("artist", out var art) ? Str(art, "name") : null;
+                    var artistId = a.TryGetProperty("artist", out art) ? Identifier(art, "id") : null;
+                    var releaseDate = Str(a, "release_date");
+                    int? year = null;
+                    if (!string.IsNullOrEmpty(releaseDate)
+                        && releaseDate.Length >= 4
+                        && int.TryParse(releaseDate[..4], out var parsedYear))
+                        year = parsedYear;
                     hits.Add(new AlbumHit(
                         id, title, artist ?? "",
                         Str(a, "cover_xl") ?? Str(a, "cover_medium"),
-                        null, trackCount, recordType));
+                        year, trackCount, recordType, artistId));
                 }
             }
         }
@@ -561,5 +705,16 @@ public class DeezerMetadataService : IDisposable
 
     private static int? Int(JsonElement e, string name)
         => e.TryGetProperty(name, out var v) && v.ValueKind == JsonValueKind.Number ? v.GetInt32() : (int?)null;
+
+    private static string? Identifier(JsonElement e, string name)
+    {
+        if (!e.TryGetProperty(name, out var value)) return null;
+        return value.ValueKind switch
+        {
+            JsonValueKind.Number when value.TryGetInt64(out var number) => number.ToString(),
+            JsonValueKind.String => value.GetString(),
+            _ => null,
+        };
+    }
 
 }

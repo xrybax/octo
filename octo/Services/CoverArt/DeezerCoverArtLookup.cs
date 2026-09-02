@@ -41,7 +41,11 @@ public class DeezerCoverArtLookup : ICoverArtSource
         var artist = (routing.Artist ?? "").Trim();
         try
         {
-            string? coverUrl = routing.Kind switch
+            // Discography and album search already received a direct Deezer CDN URL.
+            // Reusing it avoids one catalog API call per visible cover, which otherwise
+            // exhausts the shared rate limit on artists with many singles.
+            string? coverUrl = routing.CoverArtUrl;
+            coverUrl ??= routing.Kind switch
             {
                 RoutingKind.Album   => await ResolveAlbumCoverAsync(artist, (routing.Album ?? routing.Title ?? "").Trim(), ct),
                 RoutingKind.Artist  => await ResolveArtistCoverAsync(artist, ct),

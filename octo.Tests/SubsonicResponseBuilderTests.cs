@@ -272,6 +272,35 @@ public class SubsonicResponseBuilderTests
     }
 
     [Fact]
+    public void CreateArtistResponse_JsonFormat_EmitsOpenSubsonicReleaseTypes()
+    {
+        var artist = new Artist { Id = "artist123", Name = "Test Artist" };
+        var albums = new List<Album>
+        {
+            new()
+            {
+                Id = "album1",
+                Title = "Small Release",
+                Artist = "Test Artist",
+                ArtistId = "artist123",
+                ReleaseTypes = new List<string> { "ep" },
+            },
+        };
+
+        var result = _builder.CreateArtistResponse("json", artist, albums);
+
+        var jsonResult = Assert.IsType<JsonResult>(result);
+        using var doc = JsonDocument.Parse(JsonSerializer.Serialize(jsonResult.Value));
+        var releaseTypes = doc.RootElement
+            .GetProperty("subsonic-response")
+            .GetProperty("artist")
+            .GetProperty("album")[0]
+            .GetProperty("releaseTypes");
+        Assert.Equal(1, releaseTypes.GetArrayLength());
+        Assert.Equal("ep", releaseTypes[0].GetString());
+    }
+
+    [Fact]
     public void CreateArtistResponse_XmlFormat_ReturnsArtistData()
     {
         // Arrange
