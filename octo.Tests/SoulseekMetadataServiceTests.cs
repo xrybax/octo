@@ -59,6 +59,18 @@ public class SoulseekMetadataServiceTests
         {""title"":""Track One"",""duration"":180,""track_position"":1,""disk_number"":1,""artist"":{""name"":""Test Artist""}},
         {""title"":""Track Two"",""duration"":240,""track_position"":2,""disk_number"":1,""artist"":{""name"":""Test Artist""}}]}";
 
+    private const string ArtistSearchJson = @"{""data"":[
+        {""id"":42,""name"":""Test Artist"",""nb_album"":3,
+         ""picture_xl"":""https://cdn/artist.jpg""}]}";
+
+    private const string ArtistAlbumsJson = @"{""total"":3,""data"":[
+        {""id"":10,""title"":""Full Album"",""record_type"":""album"",""nb_tracks"":10,
+         ""release_date"":""2020-01-01"",""cover_xl"":""https://cdn/lp.jpg""},
+        {""id"":11,""title"":""Short EP"",""record_type"":""ep"",""nb_tracks"":4,
+         ""release_date"":""2021-01-01""},
+        {""id"":12,""title"":""New Single"",""record_type"":""single"",""nb_tracks"":1,
+         ""release_date"":""2022-01-01""}]}";
+
     [Fact]
     public async Task SearchAlbumsAsync_ReturnsAlbumsWithRegistryIds()
     {
@@ -80,6 +92,72 @@ public class SoulseekMetadataServiceTests
         Assert.NotNull(routing);
         Assert.Equal(RoutingKind.Album, routing!.Kind);
         Assert.Equal("1", routing.ExternalAlbumId);
+    }
+
+    [Fact]
+    public async Task ArtistDiscography_UsesRegistryIdsAndKeepsReleaseTypes()
+    {
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = ArtistSearchJson,
+            ["/artist/42/albums"] = ArtistAlbumsJson,
+        });
+
+        var artist = Assert.Single(await svc.SearchArtistsAsync("Test Artist", 5));
+        var artistRouting = _registry.Lookup(artist.Id);
+        Assert.NotNull(artistRouting);
+        Assert.Equal(RoutingKind.Artist, artistRouting!.Kind);
+        Assert.Equal("42", artistRouting.ExternalArtistId);
+        Assert.Equal(artist.Id, artist.ExternalId);
+        Assert.Equal(SoulseekMetadataService.ProviderName, artist.ExternalProvider);
+
+        var albums = await svc.GetArtistAlbumsAsync(
+            SoulseekMetadataService.ProviderName, artist.Id);
+
+        Assert.Equal(3, albums.Count);
+        Assert.Equal(new[] { "album", "ep", "single" },
+            albums.Select(a => a.ReleaseTypes.Single()));
+        Assert.Equal(new int?[] { 2020, 2021, 2022 }, albums.Select(a => a.Year));
+        Assert.All(albums, album =>
+        {
+            Assert.Equal(album.Id, album.ExternalId);
+            Assert.Equal(artist.Id, album.ArtistId);
+            var routing = _registry.Lookup(album.Id);
+            Assert.NotNull(routing);
+            Assert.Equal(RoutingKind.Album, routing!.Kind);
+            Assert.Equal("42", routing.ExternalArtistId);
+            Assert.False(string.IsNullOrWhiteSpace(routing.ExternalAlbumId));
+        });
+    }
+
+    [Fact]
+    public async Task ArtistDiscography_DuplicateTitlePrefersAlbumBeforeRegisteringIds()
+    {
+        const string duplicates = @"{""total"":2,""data"":[
+            {""id"":90,""title"":""Same Name"",""record_type"":""single"",""release_date"":""2024-01-01""},
+            {""id"":91,""title"":""Same Name"",""record_type"":""album"",""release_date"":""2020-01-01""}
+        ]}";
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = ArtistSearchJson,
+            ["/artist/42/albums"] = duplicates,
+        });
+        var artist = Assert.Single(await svc.SearchArtistsAsync("Test Artist", 5));
+
+        var album = Assert.Single(await svc.GetArtistAlbumsAsync(
+            SoulseekMetadataService.ProviderName, artist.Id));
+
+        Assert.Equal("album", Assert.Single(album.ReleaseTypes));
+        Assert.Equal("91", _registry.Lookup(album.Id)!.ExternalAlbumId);
+    }
+
+    [Fact]
+    public async Task ArtistDiscography_WrongProviderReturnsEmpty()
+    {
+        var svc = BuildService(new() { ["/search/artist"] = ArtistSearchJson });
+        var artist = Assert.Single(await svc.SearchArtistsAsync("Test Artist", 5));
+
+        Assert.Empty(await svc.GetArtistAlbumsAsync("deezer", artist.Id));
     }
 
     [Fact]

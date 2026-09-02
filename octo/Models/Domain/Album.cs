@@ -13,6 +13,12 @@ public class Album
     public int? SongCount { get; set; }
     public string? CoverArtUrl { get; set; }
     public string? Genre { get; set; }
+    /// <summary>
+    /// OpenSubsonic release categories such as album, ep or single. Keeping this as a
+    /// collection lets modern clients group a complete artist discography without
+    /// guessing from the track count or title.
+    /// </summary>
+    public List<string> ReleaseTypes { get; set; } = new();
     public bool IsLocal { get; set; }
     public string? ExternalProvider { get; set; }
     public string? ExternalId { get; set; }

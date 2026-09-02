@@ -475,6 +475,9 @@ public class SubsonicResponseBuilder
             ["created"] = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ"),
             ["mediaType"] = "album",
             ["displayArtist"] = album.Artist ?? "",
+            ["releaseTypes"] = album.ReleaseTypes,
+            ["isCompilation"] = album.ReleaseTypes.Any(t =>
+                string.Equals(t, "compilation", StringComparison.OrdinalIgnoreCase)),
             ["sortName"] = (album.Title ?? "").ToLowerInvariant(),
             ["isExternal"] = !album.IsLocal,
         };

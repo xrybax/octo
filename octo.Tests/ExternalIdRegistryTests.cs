@@ -99,6 +99,54 @@ public class ExternalIdRegistryTests
     }
 
     [Fact]
+    public void Register_WeakerRouting_PreservesArtistIdAndReleaseType()
+    {
+        var id = _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Album,
+            Artist = "Radiohead",
+            Album = "In Rainbows",
+            ExternalAlbumId = "14880659",
+            ExternalArtistId = "399",
+            ReleaseType = "album",
+            CoverArtUrl = "https://cdn/in-rainbows.jpg",
+        });
+
+        var sameId = _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Album,
+            Artist = "Radiohead",
+            Album = "In Rainbows",
+        });
+
+        Assert.Equal(id, sameId);
+        var routing = _registry.Lookup(id)!;
+        Assert.Equal("14880659", routing.ExternalAlbumId);
+        Assert.Equal("399", routing.ExternalArtistId);
+        Assert.Equal("album", routing.ReleaseType);
+        Assert.Equal("https://cdn/in-rainbows.jpg", routing.CoverArtUrl);
+    }
+
+    [Fact]
+    public void Register_ArtistWithoutDeezerId_DoesNotClobberKnownId()
+    {
+        var id = _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Artist,
+            Artist = "Radiohead",
+            ExternalArtistId = "399",
+        });
+
+        _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Artist,
+            Artist = "Radiohead",
+        });
+
+        Assert.Equal("399", _registry.Lookup(id)!.ExternalArtistId);
+    }
+
+    [Fact]
     public void Lookup_UnknownId_ReturnsNull()
     {
         Assert.Null(_registry.Lookup("nonexistent"));

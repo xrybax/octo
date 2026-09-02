@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Mvc;
+using System.Globalization;
 using System.Xml.Linq;
 using System.Text;
 using System.Text.Json;
@@ -751,7 +752,8 @@ public class SubsonicController : ControllerBase
     }
 
     /// <summary>
-    /// Merges local and Deezer albums.
+    /// Merges Navidrome's local albums with metadata-only releases from the active
+    /// external provider. Audio remains lazy: no YouTube or download path is touched.
     /// </summary>
     [HttpGet, HttpPost]
     [Route("rest/getArtist")]
@@ -803,91 +805,199 @@ public class SubsonicController : ControllerBase
         }
 
         var navidromeContent = Encoding.UTF8.GetString(navidromeResult.Body);
-        string artistName = "";
-        string localArtistId = id; // Keep the local artist ID for merged albums
+        var isJson = format.Equals("json", StringComparison.OrdinalIgnoreCase)
+            || navidromeResult.ContentType?.Contains("json", StringComparison.OrdinalIgnoreCase) == true;
+
+        try
+        {
+            return isJson
+                ? await MergeLocalArtistJsonAsync(navidromeResult.Body, navidromeResult.ContentType,
+                    navidromeContent, id)
+                : await MergeLocalArtistXmlAsync(navidromeResult.Body, navidromeResult.ContentType,
+                    navidromeContent, id);
+        }
+        catch (Exception ex)
+        {
+            // Artist browsing must keep working when Deezer is unavailable or sends an
+            // unexpected payload. The byte-for-byte Navidrome answer is the safe fallback.
+            _logger.LogWarning(ex,
+                "Could not enrich local artist {ArtistId}; returning Navidrome response unchanged", id);
+            return File(navidromeResult.Body, navidromeResult.ContentType ?? $"application/{format}");
+        }
+    }
+
+    private async Task<IActionResult> MergeLocalArtistJsonAsync(byte[] originalBody,
+        string? contentType, string content, string localArtistId)
+    {
+        using var jsonDoc = JsonDocument.Parse(content);
+        if (!jsonDoc.RootElement.TryGetProperty("subsonic-response", out var response)
+            || !response.TryGetProperty("artist", out var artistElement))
+            return File(originalBody, contentType ?? "application/json");
+
+        var artistName = artistElement.TryGetProperty("name", out var name)
+            ? name.GetString() ?? ""
+            : "";
+        if (string.IsNullOrWhiteSpace(artistName))
+            return File(originalBody, contentType ?? "application/json");
+
+        var externalAlbums = await GetExternalDiscographyAsync(artistName, localArtistId);
+        if (externalAlbums.Count == 0)
+            return File(originalBody, contentType ?? "application/json");
+
         var localAlbums = new List<object>();
-        object? artistData = null;
-
-        if (format == "json" || navidromeResult.ContentType?.Contains("json") == true)
+        var localKeys = new HashSet<string>(StringComparer.Ordinal);
+        if (artistElement.TryGetProperty("album", out var albums)
+            && albums.ValueKind == JsonValueKind.Array)
         {
-            var jsonDoc = JsonDocument.Parse(navidromeContent);
-            if (jsonDoc.RootElement.TryGetProperty("subsonic-response", out var response) &&
-                response.TryGetProperty("artist", out var artistElement))
+            foreach (var album in albums.EnumerateArray())
             {
-                artistName = artistElement.TryGetProperty("name", out var name) ? name.GetString() ?? "" : "";
-                artistData = _responseBuilder.ConvertSubsonicJsonElement(artistElement, true);
-                
-                if (artistElement.TryGetProperty("album", out var albums))
-                {
-                    foreach (var album in albums.EnumerateArray())
-                    {
-                        localAlbums.Add(_responseBuilder.ConvertSubsonicJsonElement(album, true));
-                    }
-                }
-            }
-        }
-
-        if (string.IsNullOrEmpty(artistName) || artistData == null)
-        {
-            return File(navidromeResult.Body, navidromeResult.ContentType ?? "application/json");
-        }
-
-        var deezerArtists = await _metadataService.SearchArtistsAsync(artistName, 1);
-        var deezerAlbums = new List<Album>();
-        
-        if (deezerArtists.Count > 0)
-        {
-            var deezerArtist = deezerArtists[0];
-            if (deezerArtist.Name.Equals(artistName, StringComparison.OrdinalIgnoreCase))
-            {
-                deezerAlbums = await _metadataService.GetArtistAlbumsAsync("deezer", deezerArtist.ExternalId!);
-                
-                // Fill artist info for each album (Deezer API doesn't include it in artist/albums endpoint)
-                // Use local artist ID and name so albums link back to the local artist
-                foreach (var album in deezerAlbums)
-                {
-                    if (string.IsNullOrEmpty(album.Artist))
-                    {
-                        album.Artist = artistName;
-                    }
-                    if (string.IsNullOrEmpty(album.ArtistId))
-                    {
-                        album.ArtistId = localArtistId;
-                    }
-                }
-            }
-        }
-
-        var localAlbumNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var album in localAlbums)
-        {
-            if (album is Dictionary<string, object> dict && dict.TryGetValue("name", out var nameObj))
-            {
-                localAlbumNames.Add(nameObj?.ToString() ?? "");
+                var converted = _responseBuilder.ConvertSubsonicJsonElement(album, true);
+                localAlbums.Add(converted);
+                var title = AlbumTitle(album);
+                if (!string.IsNullOrWhiteSpace(title)) localKeys.Add(NormalizeCatalogName(title));
             }
         }
 
         var mergedAlbums = localAlbums.ToList();
-        foreach (var deezerAlbum in deezerAlbums)
+        foreach (var album in externalAlbums)
         {
-            if (!localAlbumNames.Contains(deezerAlbum.Title))
-            {
-                mergedAlbums.Add(_responseBuilder.ConvertAlbumToJson(deezerAlbum));
-            }
+            var key = NormalizeCatalogName(album.Title);
+            if (key.Length == 0 || !localKeys.Add(key)) continue;
+            mergedAlbums.Add(_responseBuilder.ConvertAlbumToJson(album));
         }
 
-        if (artistData is Dictionary<string, object> artistDict)
-        {
-            artistDict["album"] = mergedAlbums;
-            artistDict["albumCount"] = mergedAlbums.Count;
-        }
+        // Nothing new survived de-duplication, so preserve Navidrome's response exactly.
+        if (mergedAlbums.Count == localAlbums.Count)
+            return File(originalBody, contentType ?? "application/json");
+
+        var artistData = (Dictionary<string, object>)
+            _responseBuilder.ConvertSubsonicJsonElement(artistElement, true);
+        artistData["album"] = mergedAlbums;
+        artistData["albumCount"] = mergedAlbums.Count;
 
         return _responseBuilder.CreateJsonResponse(new
         {
             status = "ok",
             version = "1.16.1",
-            artist = artistData
+            artist = artistData,
         });
+    }
+
+    private async Task<IActionResult> MergeLocalArtistXmlAsync(byte[] originalBody,
+        string? contentType, string content, string localArtistId)
+    {
+        var document = XDocument.Parse(content);
+        var root = document.Root;
+        if (root is null) return File(originalBody, contentType ?? "application/xml");
+
+        var ns = root.GetDefaultNamespace();
+        var artistElement = root.Element(ns + "artist");
+        var artistName = artistElement?.Attribute("name")?.Value ?? "";
+        if (artistElement is null || string.IsNullOrWhiteSpace(artistName))
+            return File(originalBody, contentType ?? "application/xml");
+
+        var externalAlbums = await GetExternalDiscographyAsync(artistName, localArtistId);
+        if (externalAlbums.Count == 0)
+            return File(originalBody, contentType ?? "application/xml");
+
+        var localKeys = artistElement.Elements(ns + "album")
+            .Select(AlbumTitle)
+            .Where(title => !string.IsNullOrWhiteSpace(title))
+            .Select(NormalizeCatalogName)
+            .ToHashSet(StringComparer.Ordinal);
+
+        var added = 0;
+        foreach (var album in externalAlbums)
+        {
+            var key = NormalizeCatalogName(album.Title);
+            if (key.Length == 0 || !localKeys.Add(key)) continue;
+            artistElement.Add(_responseBuilder.ConvertAlbumToXml(album, ns));
+            added++;
+        }
+
+        if (added == 0) return File(originalBody, contentType ?? "application/xml");
+
+        artistElement.SetAttributeValue("albumCount", artistElement.Elements(ns + "album").Count());
+        return new ContentResult
+        {
+            Content = document.ToString(),
+            ContentType = contentType ?? "application/xml",
+            StatusCode = 200,
+        };
+    }
+
+    private async Task<List<Album>> GetExternalDiscographyAsync(string artistName,
+        string localArtistId)
+    {
+        // Search more than one candidate: Deezer orders by popularity, so the first
+        // result is not guaranteed to be the exact artist for short/common names.
+        var candidates = await _metadataService.SearchArtistsAsync(artistName, 5);
+        var wanted = NormalizeCatalogName(artistName);
+        var match = candidates.FirstOrDefault(a => NormalizeCatalogName(a.Name) == wanted);
+        if (match is null
+            || string.IsNullOrWhiteSpace(match.ExternalProvider)
+            || string.IsNullOrWhiteSpace(match.ExternalId))
+            return new List<Album>();
+
+        var albums = await _metadataService.GetArtistAlbumsAsync(
+            match.ExternalProvider, match.ExternalId);
+
+        // Exact duplicate titles cannot be represented as separate rows yet because
+        // Octo's stable album id is derived from artist + title. Prefer the most useful
+        // release type until the registry format gains edition-aware ids.
+        albums = albums
+            .Where(a => !string.IsNullOrWhiteSpace(a.Title))
+            .GroupBy(a => NormalizeCatalogName(a.Title), StringComparer.Ordinal)
+            .Select(g => g
+                .OrderBy(ReleaseTypeRank)
+                .ThenByDescending(a => a.Year ?? 0)
+                .First())
+            .ToList();
+
+        foreach (var album in albums)
+        {
+            // These rows live inside a LOCAL artist response. Always point their parent
+            // back to that local id; retaining the external artist id makes clients show
+            // a second, disconnected artist page containing only catalog metadata.
+            album.Artist = artistName;
+            album.ArtistId = localArtistId;
+        }
+
+        return albums;
+    }
+
+    private static int ReleaseTypeRank(Album album)
+    {
+        var type = album.ReleaseTypes.FirstOrDefault()?.ToLowerInvariant();
+        return type switch
+        {
+            "album" => 0,
+            "ep" => 1,
+            "single" => 2,
+            _ => 3,
+        };
+    }
+
+    private static string AlbumTitle(JsonElement album)
+    {
+        if (album.TryGetProperty("name", out var name) && name.ValueKind == JsonValueKind.String)
+            return name.GetString() ?? "";
+        if (album.TryGetProperty("title", out var title) && title.ValueKind == JsonValueKind.String)
+            return title.GetString() ?? "";
+        return "";
+    }
+
+    private static string AlbumTitle(XElement album) =>
+        album.Attribute("name")?.Value ?? album.Attribute("title")?.Value ?? "";
+
+    private static string NormalizeCatalogName(string value)
+    {
+        var decomposed = value.Normalize(NormalizationForm.FormD);
+        return new string(decomposed
+            .Where(c => CharUnicodeInfo.GetUnicodeCategory(c) != UnicodeCategory.NonSpacingMark)
+            .Where(char.IsLetterOrDigit)
+            .Select(char.ToLowerInvariant)
+            .ToArray());
     }
 
     /// <summary>

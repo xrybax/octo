@@ -26,15 +26,20 @@ public class ExternalIdRegistry
     {
         var id = MakeShortId(routing);
 
-        // A song row mints an album routing with no Deezer id (ConvertSongToJson), and it
-        // hashes to the same id as the one an album search already resolved. Registering it
-        // must not erase that id. Best-effort only: this is an optimization, and losing the
-        // race just sends GetAlbumAsync down its cached name-lookup fallback.
-        if (routing.ExternalAlbumId is null
-            && _byId.TryGetValue(id, out var existing)
-            && existing.ExternalAlbumId is not null)
+        // A song row can mint weaker album/artist routings than catalog search did, and
+        // they hash to the same ids. Registering them must not erase the provider ids or
+        // release type already resolved. Best-effort only: losing the album-id race just
+        // sends GetAlbumAsync down its cached name-lookup fallback.
+        if (_byId.TryGetValue(id, out var existing))
         {
-            routing.ExternalAlbumId = existing.ExternalAlbumId;
+            if (routing.ExternalAlbumId is null && existing.ExternalAlbumId is not null)
+                routing.ExternalAlbumId = existing.ExternalAlbumId;
+            if (routing.ExternalArtistId is null && existing.ExternalArtistId is not null)
+                routing.ExternalArtistId = existing.ExternalArtistId;
+            if (routing.ReleaseType is null && existing.ReleaseType is not null)
+                routing.ReleaseType = existing.ReleaseType;
+            if (routing.CoverArtUrl is null && existing.CoverArtUrl is not null)
+                routing.CoverArtUrl = existing.CoverArtUrl;
         }
 
         _byId[id] = routing;
