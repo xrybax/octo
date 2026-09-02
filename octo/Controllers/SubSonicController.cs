@@ -47,6 +47,7 @@ public class SubsonicController : ControllerBase
     private readonly Octo.Services.Common.TrackAcquisitionQueue _acquisitions;
     private readonly HeartAcquisitionCoordinator _heartAcquisitions;
     private readonly Octo.Services.Common.ExternalSearchService _externalSearch;
+    private readonly SearchRequestCoordinator _searchRequests;
     private readonly RadioQueueStore _radioQueueStore;
     private readonly NavidromeIdentityService _navIdentity;
     private readonly ILogger<SubsonicController> _logger;
@@ -64,6 +65,7 @@ public class SubsonicController : ControllerBase
         Octo.Services.Common.TrackAcquisitionQueue acquisitions,
         HeartAcquisitionCoordinator heartAcquisitions,
         Octo.Services.Common.ExternalSearchService externalSearch,
+        SearchRequestCoordinator searchRequests,
         RadioQueueStore radioQueueStore,
         NavidromeIdentityService navIdentity,
         ILogger<SubsonicController> logger,
@@ -85,6 +87,7 @@ public class SubsonicController : ControllerBase
         _acquisitions = acquisitions;
         _heartAcquisitions = heartAcquisitions;
         _externalSearch = externalSearch;
+        _searchRequests = searchRequests;
         _radioQueueStore = radioQueueStore;
         _navIdentity = navIdentity;
         _playlistSyncService = playlistSyncService;
@@ -289,6 +292,18 @@ public class SubsonicController : ControllerBase
         return await _requestParser.ExtractAllParametersAsync(Request);
     }
 
+    private string SearchClientKey(Dictionary<string, string> parameters)
+    {
+        // Subsonic has no session id. User + advertised client + peer address keeps
+        // separate devices independent while grouping all category requests made by
+        // one search box. User-Agent helps when a reverse proxy hides peer addresses.
+        return string.Join('\u001f',
+            parameters.GetValueOrDefault("u", "").Trim().ToLowerInvariant(),
+            parameters.GetValueOrDefault("c", "").Trim().ToLowerInvariant(),
+            HttpContext.Connection.RemoteIpAddress?.ToString() ?? "unknown",
+            Request.Headers.UserAgent.ToString());
+    }
+
     /// <summary>
     /// Search3 hijack. We OWN search results: ~90% Last.fm-driven external songs
     /// (YouTube-resolved on play), ~10% local matches at the bottom for things
@@ -344,6 +359,7 @@ public class SubsonicController : ControllerBase
         var requestedSongs   = int.TryParse(parameters.GetValueOrDefault("songCount",   "20"), out var sc)  ? sc  : 20;
         var requestedAlbums  = int.TryParse(parameters.GetValueOrDefault("albumCount",  "20"), out var ac)  ? ac  : 20;
         var requestedArtists = int.TryParse(parameters.GetValueOrDefault("artistCount", "20"), out var arc) ? arc : 20;
+        var searchLease = _searchRequests.Begin(SearchClientKey(parameters), cleanQuery);
 
         // Always include local results. The earlier behavior special-cased
         // songCount>=200 (Arpeggi's default) to suppress local songs entirely
@@ -365,23 +381,6 @@ public class SubsonicController : ControllerBase
         // album-only search still gets album discovery.
         var isTypeAheadProbe = requestedSongs > 0 && externalTarget == 0;
 
-        // Album discovery runs concurrently with the song fan-out below so it costs no
-        // serial latency. It needs no Last.fm key (Deezer's catalog is keyless), so albums
-        // still appear for a user who has not set one up.
-        var albumTask = requestedAlbums > 0 && !isTypeAheadProbe
-            ? _metadataService.SearchAlbumsAsync(cleanQuery, Math.Min(requestedAlbums, 20))
-            : Task.FromResult(new List<Album>());
-
-        // One build per query, shared by every caller. Clients routinely fire several
-        // search calls for a single typed query, and those calls resolve to the same
-        // routing objects, so without this each one would re-run the whole enrichment
-        // pipeline over them concurrently. Started here rather than awaited, so it
-        // overlaps the local relay below; how many of its rows we actually use depends
-        // on what that relay comes back with.
-        var externalTask = externalTarget > 0
-            ? _externalSearch.GetAsync(cleanQuery)
-            : Task.FromResult<IReadOnlyList<Song>>(Array.Empty<Song>());
-
         // Local pass-through. Albums/artists always get the full requested counts;
         // song-side gets the local target.
         var localParams = new Dictionary<string, string>(parameters)
@@ -390,7 +389,23 @@ public class SubsonicController : ControllerBase
             ["albumCount"]  = requestedAlbums.ToString(),
             ["artistCount"] = requestedArtists.ToString(),
         };
-        var localResult = await _proxyService.RelaySafeAsync(searchEndpoint, localParams);
+        var localTask = _proxyService.RelaySafeAsync(searchEndpoint, localParams);
+
+        var wantsExternalAlbums = requestedAlbums > 0 && !isTypeAheadProbe;
+        var wantsExternalSongs = externalTarget > 0;
+        var wantsExternalPlaylists = _subsonicSettings.EnableExternalPlaylists;
+        var wantsExternal = wantsExternalAlbums || wantsExternalSongs || wantsExternalPlaylists;
+
+        // Local search is already in flight above. Only the catalog fan-out waits: when
+        // Resonus sends ma -> mad -> mado -> madonna, the first three generations wake as
+        // stale and never touch Last.fm, Deezer or yt-dlp. Requests for the same final
+        // query share a generation and continue to ExternalSearchService's single-flight.
+        var debounceWatch = System.Diagnostics.Stopwatch.StartNew();
+        var latestAfterDebounce = !wantsExternal
+            || await _searchRequests.WaitForLatestAsync(searchLease, HttpContext.RequestAborted);
+        debounceWatch.Stop();
+
+        var localResult = await localTask;
 
         // Subsonic reports its own errors inside an HTTP 200, so a rejected login and an
         // empty library are the same thing to every check above this line. Left alone,
@@ -401,6 +416,35 @@ public class SubsonicController : ControllerBase
             _logger.LogDebug("upstream rejected the search for '{Q}'; passing its error through", cleanQuery);
             return File(localResult.Body!, localResult.ContentType ?? $"application/{format}");
         }
+
+        // The local relay may have taken longer than the debounce. Check once more before
+        // starting external work so a newer query that arrived meanwhile still wins.
+        var runExternal = wantsExternal
+            && latestAfterDebounce
+            && _searchRequests.IsLatest(searchLease);
+
+        if (wantsExternal && !runExternal)
+        {
+            _logger.LogInformation(
+                "Search coordination '{Q}': external=skipped-stale debounce_ms={DebounceMs}",
+                cleanQuery,
+                debounceWatch.ElapsedMilliseconds);
+        }
+
+        // Album discovery and the song fan-out start only for the settled query. They run
+        // concurrently, so the debounce does not introduce any extra serialization after
+        // the local response has arrived.
+        var albumTask = runExternal && wantsExternalAlbums
+            ? SearchAlbumsSafeAsync(cleanQuery, Math.Min(requestedAlbums, 20))
+            : Task.FromResult(new List<Album>());
+
+        var externalTask = runExternal && wantsExternalSongs
+            ? _externalSearch.GetAsync(cleanQuery)
+            : Task.FromResult<IReadOnlyList<Song>>(Array.Empty<Song>());
+
+        var playlistTask = runExternal && wantsExternalPlaylists
+            ? SearchPlaylistsSafeAsync(cleanQuery, requestedAlbums)
+            : Task.FromResult(new List<ExternalPlaylist>());
 
         // Parsed here rather than inside the merge so the count that sizes the discovery
         // slice below is taken from the very list the response will render. Deriving it
@@ -415,24 +459,37 @@ public class SubsonicController : ControllerBase
         // target is a reservation rather than a promise: Navidrome returns what it has.
         // If the relay failed outright the count is zero, and filling the page with
         // discovery is the right answer there too, since the merge will show no locals.
+        var externalWatch = System.Diagnostics.Stopwatch.StartNew();
         var built = await externalTask;
         var externalSlice = Math.Min(
             built.Count,
             externalTarget + Math.Max(0, localSongTarget - localParsed.Songs.Count));
         var externalSongs = built.Take(externalSlice).ToList();
 
-        var playlistTask = _subsonicSettings.EnableExternalPlaylists
-            ? await _metadataService.SearchPlaylistsAsync(cleanQuery, requestedAlbums)
-            : new List<ExternalPlaylist>();
+        var externalAlbums = await albumTask;
+        var externalPlaylists = await playlistTask;
+        externalWatch.Stop();
 
-        // Degrade to no albums rather than failing the whole search if Deezer is slow,
-        // throttled or unreachable.
-        List<Album> externalAlbums;
-        try { externalAlbums = await albumTask; }
-        catch (Exception ex)
+        // If the user resumed typing after the fan-out began, do not let the old response
+        // replace the settled query in clients that do not cancel their earlier request.
+        if (runExternal && !_searchRequests.IsLatest(searchLease))
         {
-            _logger.LogDebug("external album search failed for '{Q}': {M}", cleanQuery, ex.Message);
-            externalAlbums = new List<Album>();
+            externalSongs.Clear();
+            externalAlbums.Clear();
+            externalPlaylists.Clear();
+            _logger.LogInformation(
+                "Search coordination '{Q}': external=discarded-stale debounce_ms={DebounceMs} external_ms={ExternalMs}",
+                cleanQuery,
+                debounceWatch.ElapsedMilliseconds,
+                externalWatch.ElapsedMilliseconds);
+        }
+        else if (runExternal)
+        {
+            _logger.LogInformation(
+                "Search coordination '{Q}': external=completed debounce_ms={DebounceMs} external_ms={ExternalMs}",
+                cleanQuery,
+                debounceWatch.ElapsedMilliseconds,
+                externalWatch.ElapsedMilliseconds);
         }
 
         var externalResult = new SearchResult
@@ -448,7 +505,27 @@ public class SubsonicController : ControllerBase
         var localSongIds = ExtractLocalSongIds(localResult.Body, localResult.ContentType);
         _radioQueueStore.Register(localSongIds.Concat(externalSongs.Select(s => s.Id)));
 
-        return MergeSearchResults(localParsed, localResult.ContentType, externalResult, playlistTask, format, envelope);
+        return MergeSearchResults(localParsed, localResult.ContentType, externalResult, externalPlaylists, format, envelope);
+    }
+
+    private async Task<List<Album>> SearchAlbumsSafeAsync(string query, int limit)
+    {
+        try { return await _metadataService.SearchAlbumsAsync(query, limit); }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("external album search failed for '{Q}': {M}", query, ex.Message);
+            return new List<Album>();
+        }
+    }
+
+    private async Task<List<ExternalPlaylist>> SearchPlaylistsSafeAsync(string query, int limit)
+    {
+        try { return await _metadataService.SearchPlaylistsAsync(query, limit); }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("external playlist search failed for '{Q}': {M}", query, ex.Message);
+            return new List<ExternalPlaylist>();
+        }
     }
 
     /// <summary>
