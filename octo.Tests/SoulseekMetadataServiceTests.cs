@@ -15,7 +15,9 @@ public class SoulseekMetadataServiceTests
 
     /// <summary>Builds the service with a Deezer layer answering from a url-substring map.
     /// YouTube is never reached by the album paths under test.</summary>
-    private SoulseekMetadataService BuildService(Dictionary<string, string> routes)
+    private SoulseekMetadataService BuildService(
+        Dictionary<string, string> routes,
+        Action<Uri>? onRequest = null)
     {
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected()
@@ -25,6 +27,7 @@ public class SoulseekMetadataServiceTests
             .ReturnsAsync((HttpRequestMessage req, CancellationToken _) =>
             {
                 var url = req.RequestUri!.ToString();
+                onRequest?.Invoke(req.RequestUri);
                 foreach (var (needle, body) in routes)
                 {
                     if (url.Contains(needle, StringComparison.OrdinalIgnoreCase))
@@ -70,6 +73,29 @@ public class SoulseekMetadataServiceTests
          ""release_date"":""2021-01-01""},
         {""id"":12,""title"":""New Single"",""record_type"":""single"",""nb_tracks"":1,
          ""release_date"":""2022-01-01""}]}";
+
+    private const string TrackSearchJson = @"{""data"":[
+        {""id"":100,""title"":""Test Track"",""duration"":205,
+         ""album"":{""id"":99,""title"":""Test Album"",""cover_xl"":""https://cdn/track.jpg""},
+         ""artist"":{""name"":""Test Artist""}}]}";
+
+    [Fact]
+    public async Task SearchEnrichmentSkipsPerTrackAlbumYearRequest()
+    {
+        var requested = new List<string>();
+        var svc = BuildService(
+            new() { ["/search?"] = TrackSearchJson },
+            uri => requested.Add(uri.AbsolutePath));
+        var songs = await svc.SearchSongsByArtistTitleAsync("Test Artist", "Test Track");
+
+        await svc.EnrichExternalSongsAsync(songs);
+
+        var song = Assert.Single(songs);
+        Assert.Equal("Test Album", song.Album);
+        Assert.Equal(205, song.Duration);
+        Assert.Null(song.Year);
+        Assert.DoesNotContain("/album/99", requested);
+    }
 
     [Fact]
     public async Task SearchAlbumsAsync_ReturnsAlbumsWithRegistryIds()

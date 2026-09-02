@@ -1,5 +1,6 @@
 using Octo.Models.Domain;
 using Octo.Services.LastFm;
+using System.Diagnostics;
 
 namespace Octo.Services.Common;
 
@@ -95,59 +96,114 @@ public sealed class ExternalSearchService
     /// </summary>
     private async Task<List<Song>> BuildAsync(string query, CancellationToken ct)
     {
+        var totalWatch = Stopwatch.StartNew();
+        var stageWatch = Stopwatch.StartNew();
+        var stage = "lastfm";
+        var outcome = "failed";
+        long lastFmMs = -1;
+        long placeholdersMs = -1;
+        long deezerMs = -1;
+        long youtubeMs = -1;
+        var songCount = 0;
+
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var collected = new List<(string Artist, string Title)>();
-
-        var tracks = await _lastFm!.SearchTracksAsync(query, Math.Min(50, BuildSize * 2));
-        foreach (var t in tracks)
+        try
         {
-            var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
-            if (seen.Add(key)) collected.Add((t.Artist, t.Title));
-            if (collected.Count >= BuildSize) break;
-        }
-
-        if (collected.Count < BuildSize)
-        {
-            // Use the first track-search hit's artist as the canonical anchor
-            // for top-tracks padding. Falls back to the raw query string when
-            // track.search came back empty.
-            var anchor = tracks.Count > 0 ? tracks[0].Artist : query;
-            var topTracks = await _lastFm.GetArtistTopTracksAsync(anchor, BuildSize * 2);
-            foreach (var t in topTracks)
+            var tracks = await _lastFm!.SearchTracksAsync(query, Math.Min(50, BuildSize * 2));
+            foreach (var t in tracks)
             {
                 var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
                 if (seen.Add(key)) collected.Add((t.Artist, t.Title));
                 if (collected.Count >= BuildSize) break;
             }
-        }
 
-        var songs = new List<Song>(collected.Count);
-        foreach (var (artist, title) in collected)
+            if (collected.Count < BuildSize)
+            {
+                // Use the first track-search hit's artist as the canonical anchor
+                // for top-tracks padding. Falls back to the raw query string when
+                // track.search came back empty.
+                var anchor = tracks.Count > 0 ? tracks[0].Artist : query;
+                var topTracks = await _lastFm.GetArtistTopTracksAsync(anchor, BuildSize * 2);
+                foreach (var t in topTracks)
+                {
+                    var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
+                    if (seen.Add(key)) collected.Add((t.Artist, t.Title));
+                    if (collected.Count >= BuildSize) break;
+                }
+            }
+
+            lastFmMs = stageWatch.ElapsedMilliseconds;
+            stage = "placeholders";
+            stageWatch.Restart();
+
+            var songs = new List<Song>(collected.Count);
+            foreach (var (artist, title) in collected)
+            {
+                var hits = await _metadata.SearchSongsByArtistTitleAsync(artist, title, 1);
+                if (hits.Count > 0) songs.Add(hits[0]);
+            }
+            songCount = songs.Count;
+            placeholdersMs = stageWatch.ElapsedMilliseconds;
+            _logger.LogInformation("External search '{Q}' -> {N} placeholder songs", query, songs.Count);
+
+            // Album/art/duration from Deezer, then the ACCURATE duration for the top of
+            // the list from the real YouTube video. Release year stays lazy because it
+            // would add one extra Deezer request for every foreground row.
+            stage = "deezer";
+            stageWatch.Restart();
+            await _metadata.EnrichExternalSongsAsync(songs, ct);
+            deezerMs = stageWatch.ElapsedMilliseconds;
+
+            stage = "youtube";
+            stageWatch.Restart();
+            await _metadata.ResolveTopDurationsAsync(songs, ct);
+            youtubeMs = stageWatch.ElapsedMilliseconds;
+
+            // Fire-and-forget: pre-resolve YouTube videoIds for the top hits so the first
+            // /rest/stream click doesn't pay the cold yt-dlp double-call cost (ytsearch1: + -g,
+            // 6-16s combined). Arpeggi cancels at ~10s and falls back to a local song; without
+            // this, external playback is unreachable from that client. 12 is about what fits on
+            // the first page of search results.
+            //
+            // It runs LAST on purpose. It used to run before enrichment, where it wrote a
+            // videoId chosen with no duration hint while ResolveTopDurationsAsync was choosing
+            // a different one using the Deezer duration — so for the top rows the two raced and
+            // the loser could leave a song advertising the length of a video that would not be
+            // the one played.
+            _ = _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
+
+            stage = "done";
+            outcome = "completed";
+            return songs;
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
         {
-            var hits = await _metadata.SearchSongsByArtistTitleAsync(artist, title, 1);
-            if (hits.Count > 0) songs.Add(hits[0]);
+            outcome = "timeout";
+            throw;
         }
-        _logger.LogInformation("External search '{Q}' -> {N} placeholder songs", query, songs.Count);
+        finally
+        {
+            var partialMs = stageWatch.ElapsedMilliseconds;
+            switch (stage)
+            {
+                case "lastfm" when lastFmMs < 0: lastFmMs = partialMs; break;
+                case "placeholders" when placeholdersMs < 0: placeholdersMs = partialMs; break;
+                case "deezer" when deezerMs < 0: deezerMs = partialMs; break;
+                case "youtube" when youtubeMs < 0: youtubeMs = partialMs; break;
+            }
 
-        // Album/art/year from Deezer (fast), then the ACCURATE duration for the top of the
-        // list from the real YouTube video (so the scrub bar matches the audio and the
-        // client advances correctly). Bounded + cached.
-        await _metadata.EnrichExternalSongsAsync(songs, ct);
-        await _metadata.ResolveTopDurationsAsync(songs, ct);
-
-        // Fire-and-forget: pre-resolve YouTube videoIds for the top hits so the first
-        // /rest/stream click doesn't pay the cold yt-dlp double-call cost (ytsearch1: + -g,
-        // 6-16s combined). Arpeggi cancels at ~10s and falls back to a local song; without
-        // this, external playback is unreachable from that client. 12 is about what fits on
-        // the first page of search results.
-        //
-        // It runs LAST on purpose. It used to run before enrichment, where it wrote a
-        // videoId chosen with no duration hint while ResolveTopDurationsAsync was choosing
-        // a different one using the Deezer duration — so for the top rows the two raced and
-        // the loser could leave a song advertising the length of a video that would not be
-        // the one played.
-        _ = _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
-
-        return songs;
+            _logger.LogInformation(
+                "External search timing '{Q}': outcome={Outcome} stopped_at={Stage} lastfm_ms={LastFmMs} placeholders_ms={PlaceholdersMs} deezer_ms={DeezerMs} youtube_ms={YouTubeMs} total_ms={TotalMs} songs={Songs}",
+                query,
+                outcome,
+                stage,
+                lastFmMs,
+                placeholdersMs,
+                deezerMs,
+                youtubeMs,
+                totalWatch.ElapsedMilliseconds,
+                songCount);
+        }
     }
 }
