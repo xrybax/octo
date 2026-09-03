@@ -119,7 +119,7 @@ public sealed class ExternalSearchService
         long deezerPrefetchMs = -1;
         long deezerMs = -1;
         long youtubeMs = -1;
-        var deezerPrefetchHits = 0;
+        var deezerPrefetchRows = 0;
         var songCount = 0;
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -174,7 +174,7 @@ public sealed class ExternalSearchService
             stage = "deezer";
             stageWatch.Restart();
             var prefetch = await deezerPrefetchTask;
-            deezerPrefetchHits = prefetch.Hits;
+            deezerPrefetchRows = prefetch.Rows;
             deezerPrefetchMs = prefetch.ElapsedMilliseconds;
             await _metadata.EnrichExternalSongsAsync(songs, ct);
             deezerMs = stageWatch.ElapsedMilliseconds;
@@ -209,14 +209,14 @@ public sealed class ExternalSearchService
             }
 
             _logger.LogInformation(
-                "External search timing '{Q}': outcome={Outcome} stopped_at={Stage} lastfm_ms={LastFmMs} placeholders_ms={PlaceholdersMs} deezer_prefetch_ms={DeezerPrefetchMs} deezer_prefetch_hits={DeezerPrefetchHits} deezer_ms={DeezerMs} youtube_ms={YouTubeMs} youtube_mode=background total_ms={TotalMs} songs={Songs}",
+                "External search timing '{Q}': outcome={Outcome} stopped_at={Stage} lastfm_ms={LastFmMs} placeholders_ms={PlaceholdersMs} deezer_prefetch_ms={DeezerPrefetchMs} deezer_prefetch_rows={DeezerPrefetchRows} deezer_ms={DeezerMs} youtube_ms={YouTubeMs} youtube_mode=background total_ms={TotalMs} songs={Songs}",
                 query,
                 outcome,
                 stage,
                 lastFmMs,
                 placeholdersMs,
                 deezerPrefetchMs,
-                deezerPrefetchHits,
+                deezerPrefetchRows,
                 deezerMs,
                 youtubeMs,
                 totalWatch.ElapsedMilliseconds,
@@ -224,7 +224,7 @@ public sealed class ExternalSearchService
         }
     }
 
-    private async Task<(int Hits, long ElapsedMilliseconds)> PrefetchSearchMetadataTimedAsync(
+    private async Task<(int Rows, long ElapsedMilliseconds)> PrefetchSearchMetadataTimedAsync(
         string query,
         CancellationToken ct)
     {
