@@ -528,4 +528,25 @@ public class DeezerMetadataServiceTests
         Assert.NotNull(second);
         Assert.Equal("Canciones Prohibidas", second!.AlbumTitle);
     }
+
+    [Fact]
+    public async Task PrefetchTrackMetadataAsync_PrimesExactTrackEnrichmentCache()
+    {
+        const string tracks =
+            @"{""data"":[{""title"":""Głucha Noc"",""duration"":247,
+               ""album"":{""title"":""Na legalu?"",""cover_xl"":""https://cdn/peja.jpg""},
+               ""artist"":{""name"":""Peja"",""picture_xl"":""https://cdn/artist.jpg""}}]}";
+        var requests = new List<HttpRequestMessage>();
+        var svc = BuildService(new() { ["/search?q="] = tracks }, capture: requests);
+
+        var seeded = await svc.PrefetchTrackMetadataAsync("peja", 25);
+        var meta = await svc.EnrichTrackAsync("Peja", "Głucha Noc", includeYear: false);
+
+        Assert.Equal(1, seeded);
+        Assert.NotNull(meta);
+        Assert.Equal("Na legalu?", meta!.AlbumTitle);
+        Assert.Equal(247, meta.Duration);
+        Assert.Equal("https://cdn/peja.jpg", meta.AlbumCoverUrl);
+        Assert.Single(requests);
+    }
 }

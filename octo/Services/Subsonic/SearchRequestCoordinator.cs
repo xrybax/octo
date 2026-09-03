@@ -13,7 +13,7 @@ namespace Octo.Services.Subsonic;
 /// </summary>
 public sealed class SearchRequestCoordinator
 {
-    public static readonly TimeSpan DefaultDebounce = TimeSpan.FromMilliseconds(400);
+    public static readonly TimeSpan DefaultDebounce = TimeSpan.FromMilliseconds(300);
 
     private static readonly long RetentionMilliseconds =
         (long)TimeSpan.FromMinutes(30).TotalMilliseconds;
