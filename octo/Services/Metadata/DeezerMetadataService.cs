@@ -133,6 +133,9 @@ public class DeezerMetadataService : IDisposable
         _logger = logger;
     }
 
+    private static string TrackCacheKey(string? artist, string? title)
+        => $"t|{artist}|{title}".ToLowerInvariant();
+
     private HttpClient Client()
     {
         // Named so the rate-limiting handler is in the chain. Resolving the default
@@ -146,6 +149,85 @@ public class DeezerMetadataService : IDisposable
         return c;
     }
 
+    /// <summary>
+    /// Performs one broad track search for the raw user query and primes the exact
+    /// artist/title cache consumed by <see cref="EnrichTrackAsync"/>. External search
+    /// launches this in parallel with Last.fm: matching rows become cache hits, while
+    /// tracks Deezer did not return retain the existing exact-query fallback.
+    /// </summary>
+    public async Task<int> PrefetchTrackMetadataAsync(string query, int limit = 25,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query) || limit <= 0) return 0;
+
+        limit = Math.Min(limit, 100);
+        var searchKey = $"ts|{query}|{limit}".ToLowerInvariant();
+        if (TryGetCached<int>(searchKey, out var cached)) return cached;
+
+        var seeded = 0;
+        try
+        {
+            var q = Uri.EscapeDataString(query);
+            using var r = await GetJsonAsync($"{Base}/search?q={q}&limit={limit}", ct);
+            if (r.Transient) return 0;
+
+            if (r.Doc is not null
+                && r.Doc.RootElement.TryGetProperty("data", out var data)
+                && data.ValueKind == JsonValueKind.Array)
+            {
+                var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var t in data.EnumerateArray())
+                {
+                    var title = Str(t, "title");
+                    var artist = t.TryGetProperty("artist", out var art) ? Str(art, "name") : null;
+                    if (string.IsNullOrWhiteSpace(artist) || string.IsNullOrWhiteSpace(title)) continue;
+
+                    var trackKey = TrackCacheKey(artist, title);
+                    // Deezer can list the same recording on a single and an album. Its
+                    // first hit is relevance-ranked, so keep that metadata.
+                    if (!seen.Add(trackKey)) continue;
+
+                    string? albumTitle = null, cover = null, artistImage = null;
+                    if (t.TryGetProperty("album", out var album))
+                    {
+                        albumTitle = Str(album, "title");
+                        cover = Str(album, "cover_xl") ?? Str(album, "cover_medium");
+                    }
+                    if (t.TryGetProperty("artist", out art))
+                        artistImage = Str(art, "picture_xl") ?? Str(art, "picture_medium");
+
+                    var meta = new TrackMeta(
+                        albumTitle,
+                        cover,
+                        null,
+                        Int(t, "duration"),
+                        artist,
+                        artistImage);
+                    Put(trackKey, (TrackMeta?)meta, PositiveTtl);
+                    seeded++;
+                }
+            }
+
+            Put(searchKey, seeded, seeded == 0 ? NegativeTtl : PositiveTtl);
+            _logger.LogInformation(
+                "deezer broad track search '{Q}' -> {N} cached metadata rows",
+                query,
+                seeded);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Best effort and deliberately not cached: a transient/malformed response
+            // must not suppress a later retry or the exact per-track fallback.
+            _logger.LogDebug("deezer broad track search '{Q}' failed: {M}", query, ex.Message);
+        }
+
+        return seeded;
+    }
+
     /// <summary>Resolve "artist + title" to the real album + artist (name, art, year).
     /// Pass includeYear=false to skip the extra album-detail call (bulk enrichment
     /// wants duration + album fast; the year is fetched lazily by the album view).</summary>
@@ -153,7 +235,7 @@ public class DeezerMetadataService : IDisposable
         bool background = false, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(artist) && string.IsNullOrWhiteSpace(title)) return null;
-        var key = $"t|{artist}|{title}".ToLowerInvariant();
+        var key = TrackCacheKey(artist, title);
         if (TryGetCached<TrackMeta?>(key, out var cached)) return cached;
 
         TrackMeta? meta = null;

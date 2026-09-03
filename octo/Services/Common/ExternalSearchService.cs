@@ -42,6 +42,13 @@ public sealed class ExternalSearchService
     private const int TopTracksFallbackThreshold = 20;
 
     /// <summary>
+    /// One broad Deezer page is enough to cover the visible part of a normal search and
+    /// still small enough to keep response parsing cheap. Exact artist/title lookups fill
+    /// any gaps after Last.fm returns its authoritative candidate list.
+    /// </summary>
+    private const int MetadataPrefetchSize = 25;
+
+    /// <summary>
     /// Deadline for one build. Last.fm has no configured HTTP timeout of its own, so
     /// without this a single hung call would pin the query for every joined caller.
     /// </summary>
@@ -94,8 +101,8 @@ public sealed class ExternalSearchService
     }
 
     /// <summary>
-    /// Fans out to Last.fm, then fills in the metadata a client needs to render and play
-    /// the rows. Order:
+    /// Starts broad Deezer metadata prefetch alongside Last.fm, then fills in the metadata
+    /// a client needs to render and play the rows. Candidate order:
     ///   1. track.search hits (best fuzzy matches for the query as typed)
     ///   2. canonical artist's top tracks (in case (1) was thin — common for
     ///      single-word artist queries)
@@ -109,14 +116,20 @@ public sealed class ExternalSearchService
         var outcome = "failed";
         long lastFmMs = -1;
         long placeholdersMs = -1;
+        long deezerPrefetchMs = -1;
         long deezerMs = -1;
         long youtubeMs = -1;
+        var deezerPrefetchRows = 0;
         var songCount = 0;
 
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var collected = new List<(string Artist, string Title)>();
         try
         {
+            // This broad Deezer lookup depends only on the raw query, so overlap it with
+            // Last.fm instead of paying both network latencies serially. It primes the
+            // exact per-track cache; rows it does not cover use the existing fallback.
+            var deezerPrefetchTask = PrefetchSearchMetadataTimedAsync(query, ct);
             var tracks = await _lastFm!.SearchTracksAsync(query, Math.Min(50, BuildSize * 2));
             foreach (var t in tracks)
             {
@@ -156,9 +169,13 @@ public sealed class ExternalSearchService
             _logger.LogInformation("External search '{Q}' -> {N} placeholder songs", query, songs.Count);
 
             // Album/art/duration from Deezer. Release year stays lazy because it would
-            // add one extra Deezer request for every foreground row.
+            // add one extra Deezer request for every foreground row. Awaiting the broad
+            // task here usually costs nothing because it has run alongside Last.fm.
             stage = "deezer";
             stageWatch.Restart();
+            var prefetch = await deezerPrefetchTask;
+            deezerPrefetchRows = prefetch.Rows;
+            deezerPrefetchMs = prefetch.ElapsedMilliseconds;
             await _metadata.EnrichExternalSongsAsync(songs, ct);
             deezerMs = stageWatch.ElapsedMilliseconds;
 
@@ -192,16 +209,41 @@ public sealed class ExternalSearchService
             }
 
             _logger.LogInformation(
-                "External search timing '{Q}': outcome={Outcome} stopped_at={Stage} lastfm_ms={LastFmMs} placeholders_ms={PlaceholdersMs} deezer_ms={DeezerMs} youtube_ms={YouTubeMs} youtube_mode=background total_ms={TotalMs} songs={Songs}",
+                "External search timing '{Q}': outcome={Outcome} stopped_at={Stage} lastfm_ms={LastFmMs} placeholders_ms={PlaceholdersMs} deezer_prefetch_ms={DeezerPrefetchMs} deezer_prefetch_rows={DeezerPrefetchRows} deezer_ms={DeezerMs} youtube_ms={YouTubeMs} youtube_mode=background total_ms={TotalMs} songs={Songs}",
                 query,
                 outcome,
                 stage,
                 lastFmMs,
                 placeholdersMs,
+                deezerPrefetchMs,
+                deezerPrefetchRows,
                 deezerMs,
                 youtubeMs,
                 totalWatch.ElapsedMilliseconds,
                 songCount);
+        }
+    }
+
+    private async Task<(int Rows, long ElapsedMilliseconds)> PrefetchSearchMetadataTimedAsync(
+        string query,
+        CancellationToken ct)
+    {
+        var watch = Stopwatch.StartNew();
+        try
+        {
+            var hits = await _metadata.PrefetchSearchMetadataAsync(query, MetadataPrefetchSize, ct);
+            return (hits, watch.ElapsedMilliseconds);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Prefetch is an optimisation, never a requirement for search. The exact
+            // enrichment calls below remain the fallback when a provider cannot batch.
+            _logger.LogDebug("search metadata prefetch '{Q}' failed: {M}", query, ex.Message);
+            return (0, watch.ElapsedMilliseconds);
         }
     }
 }

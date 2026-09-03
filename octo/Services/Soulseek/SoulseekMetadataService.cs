@@ -94,15 +94,19 @@ public class SoulseekMetadataService : IMusicMetadataService
     // was roughly 65 requests/second on its own, which is what exhausted the quota and
     // poisoned the metadata caches (issue #8).
     //
-    // 12 is the same "first page" figure PrewarmYouTubeIdsAsync already uses. It must
-    // stay above TopDurationResolveLimit, or the rows that get a YouTube length hint
-    // would be reading a duration nobody resolved.
-    private const int SearchEnrichLimit = 12;
+    // Eight rows fit one Deezer enrichment wave at the concurrency below. A broad
+    // query-level prefetch now primes most of those cache entries while Last.fm is in
+    // flight; any misses still fall back to the exact artist/title lookup here.
+    private const int SearchEnrichLimit = 8;
 
     // Rows past the first page are warmed off the critical path, so per-row detail
     // calls (getSong, the native song endpoint) hit a populated cache instead of
     // paying for the lookup while a user waits.
     private const int BackgroundEnrichLimit = 60;
+
+    public Task<int> PrefetchSearchMetadataAsync(string query, int limit = 25,
+        CancellationToken ct = default)
+        => _deezer.PrefetchTrackMetadataAsync(query, limit, ct);
 
     public async Task EnrichExternalSongsAsync(List<Song> songs, CancellationToken ct = default)
     {

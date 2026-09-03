@@ -13,7 +13,7 @@ namespace Octo.Services.Subsonic;
 /// </summary>
 public sealed class SearchRequestCoordinator
 {
-    public static readonly TimeSpan DefaultDebounce = TimeSpan.FromMilliseconds(400);
+    public static readonly TimeSpan DefaultDebounce = TimeSpan.FromMilliseconds(300);
 
     private static readonly long RetentionMilliseconds =
         (long)TimeSpan.FromMinutes(30).TotalMilliseconds;
@@ -133,7 +133,7 @@ public sealed class SearchRequestCoordinator
     {
         // Client keys contain user/app/address data and can vary over a long-running
         // server lifetime. Opportunistic pruning keeps the coordinator bounded without
-        // adding a timer or hosted service to a 400 ms request-level concern.
+        // adding a timer or hosted service to a 300 ms request-level concern.
         if ((Interlocked.Increment(ref _beginCount) & 0xff) != 0) return;
 
         var cutoff = now - RetentionMilliseconds;
