@@ -188,7 +188,7 @@ public class SoulseekMetadataServiceTests
         Assert.Equal("Exact Artist", artist!.Name);
         Assert.Equal("https://cdn/exact.jpg", artist.ImageUrl);
         Assert.Contains("/artist/42", requested);
-        Assert.Single(requested.Where(path => path == "/search/artist"));
+        Assert.Single(requested, path => path == "/search/artist");
     }
 
     [Fact]
