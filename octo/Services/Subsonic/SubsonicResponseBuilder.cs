@@ -364,17 +364,7 @@ public class SubsonicResponseBuilder
             ? (song.Title ?? "Singles")
             : song.Album;
 
-        var artistId = song.ArtistId ?? _idRegistry.Register(new SoulseekRouting
-        {
-            Kind = RoutingKind.Artist,
-            Artist = song.Artist,
-        });
-        var albumId  = song.AlbumId  ?? _idRegistry.Register(new SoulseekRouting
-        {
-            Kind = RoutingKind.Album,
-            Artist = song.Artist,
-            Album = albumName,
-        });
+        var (artistId, albumId) = _idRegistry.RegisterSongParents(song);
 
         // Avoid empty path segments — clients that lex on '/' (Arpeggio in
         // particular) treat double-slash as malformed and quietly drop the entry.

@@ -1109,7 +1109,10 @@ public class SubsonicController : ControllerBase
         // result is not guaranteed to be the exact artist for short/common names.
         var candidates = await _metadataService.SearchArtistsAsync(artistName, 5);
         var wanted = NormalizeCatalogName(artistName);
-        var match = candidates.FirstOrDefault(a => NormalizeCatalogName(a.Name) == wanted);
+        var matches = candidates.Where(a => NormalizeCatalogName(a.Name) == wanted).ToList();
+        // A local artist id has no Deezer identity. Do not attach an unrelated
+        // discography when several catalog artists have the same display name.
+        var match = matches.Count == 1 ? matches[0] : null;
         if (match is null
             || string.IsNullOrWhiteSpace(match.ExternalProvider)
             || string.IsNullOrWhiteSpace(match.ExternalId))

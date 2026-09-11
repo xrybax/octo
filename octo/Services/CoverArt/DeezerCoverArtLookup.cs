@@ -47,6 +47,10 @@ public class DeezerCoverArtLookup : ICoverArtSource
             string? coverUrl = routing.CoverArtUrl;
             coverUrl ??= routing.Kind switch
             {
+                RoutingKind.Artist when !string.IsNullOrWhiteSpace(routing.ExternalArtistId)
+                    => await ResolveExactArtistCoverAsync(routing.ExternalArtistId, ct),
+                RoutingKind.Artist when !string.IsNullOrWhiteSpace(routing.Title)
+                    => await ResolveArtistFromTrackCoverAsync(artist, routing.Title, ct),
                 RoutingKind.Album   => await ResolveAlbumCoverAsync(artist, (routing.Album ?? routing.Title ?? "").Trim(), ct),
                 RoutingKind.Artist  => await ResolveArtistCoverAsync(artist, ct),
                 _                   => await ResolveTrackCoverAsync(artist, (routing.Title ?? "").Trim(), ct),
@@ -118,6 +122,27 @@ public class DeezerCoverArtLookup : ICoverArtSource
             }
         }
         return best;
+    }
+
+    private async Task<string?> ResolveExactArtistCoverAsync(string deezerId, CancellationToken ct)
+    {
+        using var doc = await GetJsonAsync(
+            $"https://api.deezer.com/artist/{Uri.EscapeDataString(deezerId)}", ct);
+        if (doc is null) return null;
+        var artist = doc.RootElement;
+        return ReadString(artist, "picture_xl") ?? ReadString(artist, "picture_big")
+            ?? ReadString(artist, "picture_medium");
+    }
+
+    private async Task<string?> ResolveArtistFromTrackCoverAsync(string artist, string title, CancellationToken ct)
+    {
+        var q = Uri.EscapeDataString($"artist:\"{artist}\" track:\"{title}\"");
+        using var doc = await GetJsonAsync($"https://api.deezer.com/search?q={q}&limit=1", ct);
+        if (doc is null || !doc.RootElement.TryGetProperty("data", out var data)
+            || data.ValueKind != JsonValueKind.Array || data.GetArrayLength() == 0
+            || !data[0].TryGetProperty("artist", out var match)) return null;
+        return ReadString(match, "picture_xl") ?? ReadString(match, "picture_big")
+            ?? ReadString(match, "picture_medium");
     }
 
     private async Task<JsonDocument?> GetJsonAsync(string url, CancellationToken ct)

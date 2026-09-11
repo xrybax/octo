@@ -108,6 +108,48 @@ public class DeezerMetadataServiceTests
                      ""disk_number"":1,""artist"":{{""name"":""Extremoduro""}}}}")) + "]}";
 
     [Fact]
+    public async Task ArtistSearch_FindsMissingNamesakeThroughRecordingsEvenWithOneExactNameHit()
+    {
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = """{"data":[{"id":7,"name":"Feel","nb_album":100,"picture_xl":"https://cdn/other.jpg"}]}""",
+            ["/search?"] = """
+            {"data":[
+                {"title":"Recording A","artist":{"id":42,"name":"Feel","picture_xl":"https://cdn/correct.jpg"}},
+                {"title":"Recording B","artist":{"id":42,"name":"Feel"}},
+                {"title":"Recording C","artist":{"id":7,"name":"Feel"}},
+                {"title":"Not an exact artist","artist":{"id":8,"name":"Feel Good"}}
+            ]}
+            """,
+        });
+
+        var artists = await svc.SearchArtistsAsync("Feel", 20);
+
+        Assert.Equal(new[] { "42", "7" }, artists.Select(a => a.DeezerId));
+        Assert.Equal("https://cdn/correct.jpg", artists[0].ImageUrl);
+        Assert.Equal("https://cdn/other.jpg", artists[1].ImageUrl);
+        Assert.Equal(100, artists[1].AlbumCount);
+    }
+
+    [Fact]
+    public async Task ArtistSearch_TransientSupplementDoesNotCacheIncompleteIdentityList()
+    {
+        var svc = BuildSequencedService(new()
+        {
+            ("/search/artist", new[] { """{"data":[{"id":7,"name":"Feel"}]}""" }),
+            ("/search?", new[] { QuotaEnvelope,
+                """{"data":[{"artist":{"id":42,"name":"Feel"}}]}""" }),
+        }, out var calls);
+
+        Assert.Single(await svc.SearchArtistsAsync("Feel", 20));
+        var recovered = await svc.SearchArtistsAsync("Feel", 20);
+
+        Assert.Equal(2, recovered.Count);
+        Assert.Equal(2, calls("/search?"));
+        Assert.Contains(recovered, a => a.DeezerId == "42");
+    }
+
+    [Fact]
     public async Task SearchAlbumsAsync_MapsFieldsAndDropsSingles()
     {
         // Arrange: one real album, one EP, and a one-track "single" that must be dropped.

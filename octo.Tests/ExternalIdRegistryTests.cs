@@ -12,6 +12,27 @@ public class ExternalIdRegistryTests
     }
 
     [Fact]
+    public void UnresolvedSongParents_KeepSeparateRecordingContextUntilIdentityIsKnown()
+    {
+        var first = _registry.RegisterSongParents(new Octo.Models.Domain.Song
+            { Id = "song-one", Artist = "Feel", Title = "Recording One", Album = "Feel" });
+        var second = _registry.RegisterSongParents(new Octo.Models.Domain.Song
+            { Id = "song-two", Artist = "Feel", Title = "Recording Two", Album = "Feel" });
+
+        Assert.NotEqual(first.ArtistId, second.ArtistId);
+        Assert.NotEqual(first.AlbumId, second.AlbumId);
+        Assert.Equal("Recording One", _registry.Lookup(first.ArtistId)!.Title);
+        Assert.Equal("Recording Two", _registry.Lookup(second.AlbumId)!.Title);
+
+        var strongOne = _registry.Register(new SoulseekRouting
+            { Kind = RoutingKind.Artist, Artist = "Feel", Title = "Recording One", ExternalArtistId = "42" });
+        var strongTwo = _registry.Register(new SoulseekRouting
+            { Kind = RoutingKind.Artist, Artist = "Feel", Title = "Recording Two", ExternalArtistId = "42" });
+        Assert.Equal(strongOne, strongTwo);
+        Assert.Null(_registry.Lookup(first.ArtistId)!.ExternalArtistId);
+    }
+
+    [Fact]
     public void Register_SameRouting_ProducesSameId()
     {
         // Arrange

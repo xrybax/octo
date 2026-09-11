@@ -165,7 +165,7 @@ public class SubsonicModelMapper
             .Concat(externalPlaylists.Select(p => ConvertPlaylistToAlbumJson(p)))
             .ToList();
         
-        // Deduplicate artists by name - prefer local artists over external ones
+        // Prefer the local row only when the external name is unambiguous.
         var localArtistNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var artist in localArtists)
         {
@@ -178,8 +178,10 @@ public class SubsonicModelMapper
         var mergedArtists = localArtists.ToList();
         foreach (var externalArtist in externalResult.Artists)
         {
-            // Only add external artist if no local artist with same name exists
-            if (!localArtistNames.Contains(externalArtist.Name))
+            // A local name alone cannot tell us which of several namesakes it is.
+            if (!localArtistNames.Contains(externalArtist.Name)
+                || externalResult.Artists.Count(a => string.Equals(a.Name, externalArtist.Name,
+                    StringComparison.OrdinalIgnoreCase)) > 1)
             {
                 mergedArtists.Add(_responseBuilder.ConvertArtistToJson(externalArtist));
             }
@@ -198,7 +200,7 @@ public class SubsonicModelMapper
     {
         var ns = XNamespace.Get("http://subsonic.org/restapi");
         
-        // Deduplicate artists by name - prefer local artists over external ones
+        // Prefer the local row only when the external name is unambiguous.
         var localArtistNamesXml = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var mergedArtists = new List<object>();
         
@@ -215,8 +217,10 @@ public class SubsonicModelMapper
         
         foreach (var artist in externalResult.Artists)
         {
-            // Only add external artist if no local artist with same name exists
-            if (!localArtistNamesXml.Contains(artist.Name))
+            // A local name alone cannot tell us which of several namesakes it is.
+            if (!localArtistNamesXml.Contains(artist.Name)
+                || externalResult.Artists.Count(a => string.Equals(a.Name, artist.Name,
+                    StringComparison.OrdinalIgnoreCase)) > 1)
             {
                 mergedArtists.Add(_responseBuilder.ConvertArtistToXml(artist, ns));
             }

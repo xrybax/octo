@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
+using Octo.Models.Domain;
 
 namespace Octo.Services.Soulseek;
 
@@ -57,6 +58,35 @@ public class ExternalIdRegistry
         return null;
     }
 
+    /// <summary>
+    /// Reuses provider identity even when a client reloads the song through getSong.
+    /// An unenriched row keeps its source title on the parent links so opening the
+    /// artist can resolve that recording instead of guessing from a shared name.
+    /// </summary>
+    public (string ArtistId, string AlbumId) RegisterSongParents(Song song)
+    {
+        var source = Lookup(song.Id);
+        var album = string.IsNullOrWhiteSpace(song.Album) ? song.Title : song.Album;
+        var artistId = song.ArtistId ?? Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Artist,
+            Artist = song.Artist,
+            Title = song.Title,
+            ExternalArtistId = source?.ExternalArtistId,
+        });
+        var albumId = song.AlbumId ?? Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Album,
+            Artist = song.Artist,
+            Title = song.Title,
+            Album = album,
+            ExternalAlbumId = source?.ExternalAlbumId,
+            ExternalArtistId = source?.ExternalArtistId,
+            CoverArtUrl = song.CoverArtUrl ?? source?.CoverArtUrl,
+        });
+        return (artistId, albumId);
+    }
+
     private static string MakeShortId(SoulseekRouting r)
     {
         // Derive 22 base62 chars from sha256 of routing fields. Same input -> same id.
@@ -69,6 +99,10 @@ public class ExternalIdRegistry
                 => $"k:album|deezer:{r.ExternalAlbumId}",
             RoutingKind.Artist when !string.IsNullOrWhiteSpace(r.ExternalArtistId)
                 => $"k:artist|deezer:{r.ExternalArtistId}",
+            RoutingKind.Artist when !string.IsNullOrWhiteSpace(r.Title)
+                => $"k:artist|a:{r.Artist}|t:{r.Title}",
+            RoutingKind.Album when !string.IsNullOrWhiteSpace(r.Title)
+                => $"k:album|a:{r.Artist}|al:{r.Album}|t:{r.Title}",
             RoutingKind.Album  => $"k:album|a:{r.Artist}|al:{r.Album}",
             RoutingKind.Artist => $"k:artist|a:{r.Artist}",
             _                  => $"k:song|yt:{r.YouTubeId}|a:{r.Artist}|t:{r.Title}|d:{r.Duration}",

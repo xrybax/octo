@@ -4,6 +4,7 @@ using Moq;
 using Moq.Protected;
 using Octo.Services.Metadata;
 using Octo.Services.Soulseek;
+using Octo.Services.Subsonic;
 using Octo.Services.YouTube;
 using System.Net;
 
@@ -154,7 +155,7 @@ public class SoulseekMetadataServiceTests
     }
 
     [Fact]
-    public async Task SearchArtists_DuplicateNamesPreferExactArtistWithLargestCatalog()
+    public async Task SearchArtists_PreservesNamesakesInsteadOfChoosingLargestCatalog()
     {
         const string ambiguousArtists = @"{""data"":[
             {""id"":1,""name"":""Feel Good"",""nb_album"":100},
@@ -163,10 +164,97 @@ public class SoulseekMetadataServiceTests
         ]}";
         var svc = BuildService(new() { ["/search/artist"] = ambiguousArtists });
 
-        var artist = Assert.Single(await svc.SearchArtistsAsync("Feel", 1));
+        var artists = await svc.SearchArtistsAsync("Feel", 3);
 
-        Assert.Equal("FEEL", artist.Name);
-        Assert.Equal("3", _registry.Lookup(artist.Id)!.ExternalArtistId);
+        Assert.Equal(new[] { "Feel", "FEEL", "Feel Good" }, artists.Select(a => a.Name));
+        Assert.Equal(new[] { "2", "3", "1" },
+            artists.Select(a => _registry.Lookup(a.Id)!.ExternalArtistId));
+        Assert.Equal(3, artists.Select(a => a.Id).Distinct().Count());
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SongReloadThenArtistNavigation_KeepsRecordingIdentity(bool enriched)
+    {
+        // Synthetic namesakes: the generic artist endpoint deliberately lists the
+        // wrong Feel. The clicked recording carries the authoritative artist id.
+        var requested = new List<Uri>();
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = """{"data":[{"id":7,"name":"Feel","nb_album":100}]}""",
+            ["/search?"] = TrackSearchJson.Replace("Test Artist", "Feel"),
+            ["/artist/42/albums"] = ArtistAlbumsJson,
+            ["/artist/42"] = """{"id":42,"name":"Feel","picture_xl":"https://cdn/correct.jpg"}""",
+        }, uri => requested.Add(uri));
+        var song = Assert.Single(await svc.SearchSongsByArtistTitleAsync("Feel", "Test Track"));
+        var builder = new SubsonicResponseBuilder(_registry,
+            Microsoft.Extensions.Options.Options.Create(new Octo.Models.Settings.SubsonicSettings()));
+        if (enriched) await svc.EnrichExternalSongsAsync(new() { song });
+
+        var searchRow = builder.ConvertSongToJson(song);
+        var reloaded = await svc.GetSongAsync(SoulseekMetadataService.ProviderName, song.Id);
+        Assert.NotNull(reloaded);
+        var detailRow = builder.ConvertSongToJson(reloaded!);
+        Assert.Equal(searchRow["artistId"], detailRow["artistId"]);
+        Assert.Equal(searchRow["albumId"], detailRow["albumId"]);
+
+        var artistId = Assert.IsType<string>(detailRow["artistId"]);
+        var artist = await svc.GetArtistAsync(SoulseekMetadataService.ProviderName, artistId);
+        var albums = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, artistId);
+
+        Assert.Equal("Feel", artist!.Name);
+        Assert.Equal("https://cdn/correct.jpg", artist.ImageUrl);
+        Assert.Equal("42", _registry.Lookup(artistId)!.ExternalArtistId);
+        Assert.Equal(3, albums.Count);
+        Assert.DoesNotContain(requested, uri => uri.AbsolutePath == "/search/artist");
+        Assert.Contains(requested, uri => uri.AbsolutePath == "/artist/42/albums");
+        if (!enriched)
+            Assert.Contains(requested, uri => Uri.UnescapeDataString(uri.Query).Contains("track:\"Test Track\""));
+    }
+
+    [Fact]
+    public async Task UnenrichedSongAlbum_ResolvesUsingRecordingAndRetainsParentsOnReload()
+    {
+        var requested = new List<Uri>();
+        var svc = BuildService(new()
+        {
+            ["/search?"] = TrackSearchJson,
+            ["/album/99/tracks"] = AlbumTracksJson,
+            ["/album/99"] = AlbumDetailJson,
+        }, uri => requested.Add(uri));
+        var song = Assert.Single(await svc.SearchSongsByArtistTitleAsync("Test Artist", "Test Track"));
+        var parents = _registry.RegisterSongParents(song);
+
+        var album = await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, parents.AlbumId);
+
+        Assert.Equal(2, album!.Songs.Count);
+        Assert.Equal("42", _registry.Lookup(album.ArtistId!)!.ExternalArtistId);
+        Assert.DoesNotContain(requested, uri => uri.AbsolutePath == "/search/album");
+        var reloaded = await svc.GetSongAsync(SoulseekMetadataService.ProviderName, album.Songs[0].Id);
+        Assert.Equal("42", _registry.Lookup(reloaded!.ArtistId!)!.ExternalArtistId);
+        Assert.Equal("99", _registry.Lookup(reloaded.AlbumId!)!.ExternalAlbumId);
+    }
+
+    [Fact]
+    public async Task LegacyArtistWithAmbiguousName_DoesNotGuessProfileOrDiscography()
+    {
+        var requested = new List<Uri>();
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = """{"data":[{"id":7,"name":"Feel","nb_album":100},{"id":42,"name":"Feel","nb_album":3}]}""",
+            ["/search?"] = """{"data":[]}""",
+        }, uri => requested.Add(uri));
+        var id = _registry.Register(new SoulseekRouting { Kind = RoutingKind.Artist, Artist = "Feel" });
+
+        var artist = await svc.GetArtistAsync(SoulseekMetadataService.ProviderName, id);
+        var albums = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, id);
+
+        Assert.Equal("Feel", artist!.Name);
+        Assert.Null(artist.ImageUrl);
+        Assert.Null(_registry.Lookup(id)!.ExternalArtistId);
+        Assert.Empty(albums);
+        Assert.DoesNotContain(requested, uri => uri.AbsolutePath.StartsWith("/artist/"));
     }
 
     [Fact]
