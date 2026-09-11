@@ -18,7 +18,8 @@ namespace Octo.Services.Metadata;
 public class DeezerMetadataService : IDisposable
 {
     public record TrackMeta(string? AlbumTitle, string? AlbumCoverUrl, int? Year, int? Duration,
-        string? ArtistName, string? ArtistImageUrl);
+        string? ArtistName, string? ArtistImageUrl, string? AlbumDeezerId,
+        string? ArtistDeezerId);
     public record ArtistMeta(string? Name, string? ImageUrl);
 
     /// <summary>One artist catalog match. DeezerId is kept server-side and later
@@ -165,6 +166,7 @@ public class DeezerMetadataService : IDisposable
             if (FirstData(r.Doc) is JsonElement t)
             {
                 string? albTitle = null, cover = null, artName = null, artImg = null;
+                string? artistId = null;
                 long albId = 0;
                 if (t.TryGetProperty("album", out var alb))
                 {
@@ -177,6 +179,7 @@ public class DeezerMetadataService : IDisposable
                 {
                     artName = Str(art, "name");
                     artImg = Str(art, "picture_xl") ?? Str(art, "picture_medium");
+                    artistId = Identifier(art, "id");
                 }
                 int? duration = t.TryGetProperty("duration", out var du) && du.ValueKind == JsonValueKind.Number
                     ? du.GetInt32() : null;
@@ -189,7 +192,15 @@ public class DeezerMetadataService : IDisposable
                     if (yearTransient) return null;
                     year = y;
                 }
-                meta = new TrackMeta(albTitle, cover, year, duration, artName, artImg);
+                meta = new TrackMeta(
+                    albTitle,
+                    cover,
+                    year,
+                    duration,
+                    artName,
+                    artImg,
+                    albId > 0 ? albId.ToString() : null,
+                    artistId);
             }
         }
         catch (Exception ex)
@@ -290,6 +301,50 @@ public class DeezerMetadataService : IDisposable
         return meta;
     }
 
+    /// <summary>
+    /// Loads one exact Deezer artist. A search result or enriched track already knows the
+    /// provider id and must not be allowed to drift to a different artist with the same
+    /// display name.
+    /// </summary>
+    public async Task<ArtistMeta?> EnrichArtistByIdAsync(string? deezerId,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(deezerId)) return null;
+        var key = $"aid|{deezerId}";
+        if (TryGetCached<ArtistMeta?>(key, out var cached)) return cached;
+
+        ArtistMeta? meta = null;
+        try
+        {
+            using var r = await GetJsonAsync($"{Base}/artist/{Uri.EscapeDataString(deezerId)}", ct);
+            if (r.Transient) return null;
+            if (r.Doc is not null)
+            {
+                var artist = r.Doc.RootElement;
+                if (artist.ValueKind == JsonValueKind.Object
+                    && !artist.TryGetProperty("error", out _))
+                {
+                    var name = Str(artist, "name");
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        meta = new ArtistMeta(
+                            name,
+                            Str(artist, "picture_xl")
+                            ?? Str(artist, "picture_big")
+                            ?? Str(artist, "picture_medium"));
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("deezer artist {Id} failed: {M}", deezerId, ex.Message);
+        }
+
+        Put(key, meta, meta is null ? NegativeTtl : PositiveTtl);
+        return meta;
+    }
+
     /// <summary>Search artists without touching any audio endpoint. Unlike
     /// <see cref="EnrichArtistAsync"/>, this retains the Deezer id required to request
     /// the complete discography later.</summary>
@@ -302,12 +357,17 @@ public class DeezerMetadataService : IDisposable
         var key = $"ars|{query}|{limit}".ToLowerInvariant();
         if (TryGetCached<List<ArtistHit>>(key, out var cached)) return cached!;
 
+        // The artist endpoint may expose only one of several namesakes. Track
+        // search supplies additional identities even when that one looks exact.
+        // Run both lookups together so this does not add a serial search stage.
+        var trackCandidatesTask = SearchArtistTrackCandidatesAsync(query, ct);
         var hits = new List<ArtistHit>();
+        var transient = false;
         try
         {
             var q = Uri.EscapeDataString(query);
             using var r = await GetJsonAsync($"{Base}/search/artist?q={q}&limit={limit}", ct);
-            if (r.Transient) return new List<ArtistHit>();
+            transient = r.Transient;
             if (r.Doc is not null
                 && r.Doc.RootElement.TryGetProperty("data", out var data)
                 && data.ValueKind == JsonValueKind.Array)
@@ -328,11 +388,54 @@ public class DeezerMetadataService : IDisposable
         }
         catch (Exception ex)
         {
+            transient = true;
             _logger.LogDebug("deezer artist search '{Q}' failed: {M}", query, ex.Message);
         }
 
-        Put(key, hits, hits.Count == 0 ? NegativeTtl : PositiveTtl);
+        var supplemental = await trackCandidatesTask;
+        var fromTracks = supplemental.Hits.Select(candidate =>
+            hits.FirstOrDefault(h => h.DeezerId == candidate.DeezerId) ?? candidate);
+        hits = fromTracks.Concat(hits)
+            .DistinctBy(h => h.DeezerId)
+            .OrderByDescending(h => string.Equals(h.Name.Trim(), query.Trim(), StringComparison.OrdinalIgnoreCase))
+            .Take(limit).ToList();
+        if (!transient && !supplemental.Transient)
+            Put(key, hits, hits.Count == 0 ? NegativeTtl : PositiveTtl);
         return hits;
+    }
+
+    private async Task<(List<ArtistHit> Hits, bool Transient)> SearchArtistTrackCandidatesAsync(
+        string query, CancellationToken ct)
+    {
+        var hits = new List<ArtistHit>();
+        try
+        {
+            var q = Uri.EscapeDataString($"artist:\"{query.Replace("\"", "")}\"");
+            using var r = await GetJsonAsync($"{Base}/search?q={q}&limit=50", ct);
+            if (r.Transient) return (hits, true);
+            if (r.Doc is not null
+                && r.Doc.RootElement.TryGetProperty("data", out var tracks)
+                && tracks.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var track in tracks.EnumerateArray())
+                {
+                    if (!track.TryGetProperty("artist", out var artist)) continue;
+                    var id = Identifier(artist, "id");
+                    var name = Str(artist, "name");
+                    if (id is null || !string.Equals(name?.Trim(), query.Trim(),
+                        StringComparison.OrdinalIgnoreCase)) continue;
+                    hits.Add(new ArtistHit(id, name!,
+                        Str(artist, "picture_xl") ?? Str(artist, "picture_big")
+                        ?? Str(artist, "picture_medium"), null));
+                }
+            }
+            return (hits, false);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("deezer artist track candidates '{Q}' failed: {M}", query, ex.Message);
+            return (hits, true);
+        }
     }
 
     /// <summary>

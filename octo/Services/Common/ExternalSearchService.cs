@@ -1,6 +1,7 @@
 using Octo.Models.Domain;
 using Octo.Services.LastFm;
 using System.Diagnostics;
+using Microsoft.Extensions.Caching.Memory;
 
 namespace Octo.Services.Common;
 
@@ -21,7 +22,7 @@ namespace Octo.Services.Common;
 /// from the registry rather than from a search result. Any future "top up the enrichment
 /// because this caller wanted more rows" belongs inside the build, not after it.
 /// </summary>
-public sealed class ExternalSearchService
+public sealed class ExternalSearchService : IDisposable
 {
     /// <summary>
     /// Rows built per query, regardless of how many the caller wants.
@@ -47,7 +48,20 @@ public sealed class ExternalSearchService
     /// </summary>
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromSeconds(10);
 
+    /// <summary>
+    /// Continuation requests repeat the same query with a larger songOffset. Keep the
+    /// frozen candidate set briefly so page two is both instant and ordered exactly like
+    /// page one. This is deliberately small and short-lived: it is pagination state, not
+    /// a general attempt to cache everything a user may ever type.
+    /// </summary>
+    private static readonly TimeSpan ResultTtl = TimeSpan.FromMinutes(10);
+    private const int ResultCacheEntries = 64;
+
     private readonly SingleFlight<string, List<Song>> _flight = new();
+    private readonly MemoryCache _results = new(new MemoryCacheOptions
+    {
+        SizeLimit = ResultCacheEntries,
+    });
     private readonly IMusicMetadataService _metadata;
     private readonly LastFmService? _lastFm;
     private readonly ILogger<ExternalSearchService> _logger;
@@ -77,10 +91,27 @@ public sealed class ExternalSearchService
         // Key on the query alone. The build size is constant, so two callers wanting
         // different row counts still want the same work done.
         var key = query.Trim().ToLowerInvariant();
+        if (_results.TryGetValue(key, out List<Song>? cached) && cached is not null)
+            return cached;
 
         try
         {
-            return await _flight.RunAsync(key, token => BuildAsync(query, token), BuildTimeout);
+            return await _flight.RunAsync(key, async token =>
+            {
+                var built = await BuildAsync(query, token);
+                if (built.Count > 0)
+                {
+                    // Publish before completing the single-flight task. Otherwise a
+                    // continuation request arriving in the tiny remove/set gap could
+                    // start a redundant build and receive a differently ordered page.
+                    _results.Set(key, built, new MemoryCacheEntryOptions
+                    {
+                        AbsoluteExpirationRelativeToNow = ResultTtl,
+                        Size = 1,
+                    });
+                }
+                return built;
+            }, BuildTimeout);
         }
         catch (Exception ex)
         {
@@ -92,6 +123,8 @@ public sealed class ExternalSearchService
             return Array.Empty<Song>();
         }
     }
+
+    public void Dispose() => _results.Dispose();
 
     /// <summary>
     /// Fans out to Last.fm, then fills in the metadata a client needs to render and play

@@ -23,6 +23,34 @@ public class SubsonicModelMapperTests
         _mapper = new SubsonicModelMapper(_responseBuilder, _mockLogger.Object);
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void SearchMerge_DoesNotHideNamesakesWhenALocalArtistSharesTheirName(bool json)
+    {
+        var local = new List<object>
+        {
+            json
+                ? new Dictionary<string, object> { ["id"] = "local", ["name"] = "Feel" }
+                : new XElement("artist", new XAttribute("id", "local"), new XAttribute("name", "Feel")),
+        };
+        var external = new SearchResult
+        {
+            Artists = new()
+            {
+                new Artist { Id = "feel-one", Name = "Feel" },
+                new Artist { Id = "feel-two", Name = "FEEL" },
+            },
+        };
+
+        var (_, _, artists) = _mapper.MergeSearchResults(new(), new(), local, external, new(), json);
+
+        Assert.Equal(3, artists.Count);
+        Assert.Equal(new[] { "local", "feel-one", "feel-two" }, artists.Select(a => json
+            ? ((Dictionary<string, object>)a)["id"].ToString()
+            : ((XElement)a).Attribute("id")!.Value));
+    }
+
     [Fact]
     public void ParseSearchResponse_JsonSearchResult2_ParsesLocalRows()
     {

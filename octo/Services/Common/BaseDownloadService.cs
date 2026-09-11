@@ -678,6 +678,16 @@ public abstract class BaseDownloadService : IDownloadService
         song.Title = StripArtistPrefix(song.Artist, song.Title);
         var queryTitle = StripBracketedJunk(song.Title);
 
+        // Album browsing already selected an exact edition. A global recording
+        // lookup can return an original album, compilation, or reissue per song.
+        // Keep the selected edition's shared tags even when some fields are unknown.
+        if (song.Release is not null)
+        {
+            song.Release.ApplyTo(song);
+            await WriteMetadataAsync(filePath, song, cancellationToken);
+            return;
+        }
+
         try
         {
             var deezer = _serviceProvider.GetService<Octo.Services.Metadata.DeezerMetadataService>();
@@ -765,6 +775,8 @@ public abstract class BaseDownloadService : IDownloadService
             
             if (song.Year.HasValue)
                 tagFile.Tag.Year = (uint)song.Year.Value;
+            else if (song.Release is not null)
+                tagFile.Tag.Year = 0; // Do not retain the YouTube upload year.
             
             if (!string.IsNullOrEmpty(song.Genre))
                 tagFile.Tag.Genres = new[] { song.Genre };

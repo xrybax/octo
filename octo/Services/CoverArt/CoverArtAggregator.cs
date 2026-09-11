@@ -49,6 +49,13 @@ public class CoverArtAggregator : IDisposable
 
         foreach (var source in _sources)
         {
+            // Other providers receive only the display name and cannot identify
+            // which namesake a Deezer id or a source recording refers to.
+            if (routing.Kind == RoutingKind.Artist
+                && (!string.IsNullOrWhiteSpace(routing.ExternalArtistId)
+                    || !string.IsNullOrWhiteSpace(routing.Title))
+                && source.Name != "deezer") continue;
+
             byte[]? bytes;
             try
             {
@@ -91,6 +98,10 @@ public class CoverArtAggregator : IDisposable
 
     private static string MakeCacheKey(SoulseekRouting r)
     {
+        if (r.Kind == RoutingKind.Artist && !string.IsNullOrWhiteSpace(r.ExternalArtistId))
+            return $"artist|deezer:{r.ExternalArtistId}";
+        if (r.Kind == RoutingKind.Album && !string.IsNullOrWhiteSpace(r.ExternalAlbumId))
+            return $"album|deezer:{r.ExternalAlbumId}";
         var artist = (r.Artist ?? "").Trim().ToLowerInvariant();
         var albumOrTitle = (r.Kind == RoutingKind.Album
                 ? (r.Album ?? r.Title ?? "")

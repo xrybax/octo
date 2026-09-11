@@ -82,6 +82,11 @@ public class SoulseekDownloadService : BaseDownloadService
             Track = track.Track,
             DiscNumber = track.DiscNumber,
             TotalTracks = track.TotalTracks,
+            Release = track.Release,
+            Isrc = track.Isrc,
+            ExternalAlbumId = track.Release?.DeezerId,
+            ExternalArtistId = track.Release?.ArtistDeezerId,
+            CoverArtUrl = track.CoverArtUrl,
         });
     }
 
@@ -508,9 +513,20 @@ public class SoulseekDownloadService : BaseDownloadService
     /// so an upgrade leaves previously-downloaded files exactly where they are.
     /// </summary>
     private string BuildOrganizedPath(SoulseekRouting routing, string artist, string title, string ext)
+        => BuildOrganizedPath(DownloadPath, routing, artist, title, ext);
+
+    internal static string BuildOrganizedPath(string downloadPath, SoulseekRouting routing,
+        string artist, string title, string ext)
     {
         var album = string.IsNullOrWhiteSpace(routing.Album) ? title : routing.Album!;
-        return PathHelper.BuildTrackPath(DownloadPath, artist, album, title, routing.Track, ext);
+        if (routing.Release is not null)
+        {
+            album = routing.Release.Title;
+            artist = SanitizeForFs(routing.Release.Artist) ?? artist;
+        }
+        if (routing.Release is not null && routing.DiscNumber is > 1)
+            title = $"CD{routing.DiscNumber:00} - {title}";
+        return PathHelper.BuildTrackPath(downloadPath, artist, album, title, routing.Track, ext);
     }
 
     private static string? SanitizeForFs(string? s)

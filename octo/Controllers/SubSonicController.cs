@@ -305,11 +305,11 @@ public class SubsonicController : ControllerBase
     }
 
     /// <summary>
-    /// Search3 hijack. We OWN search results: ~90% Last.fm-driven external songs
-    /// (YouTube-resolved on play), ~10% local matches at the bottom for things
-    /// that genuinely live in the user's library. This is intentional — the goal
-    /// is music DISCOVERY, not library navigation. Library navigation lives in
-    /// getAlbumList2, getArtists, etc., which still pass through to Navidrome.
+    /// Search3 hijack. Local Navidrome matches form a small prefix, followed by a
+    /// stable Last.fm-driven discovery set (YouTube-resolved on play). A later
+    /// songOffset continues through that same virtual list rather than regenerating
+    /// page one. Library navigation itself still lives in getAlbumList2, getArtists,
+    /// etc., which pass through to Navidrome.
     ///
     /// Empty queries do still pass through so a Subsonic client's "browse all"
     /// fallback isn't broken; with a query, we hijack.
@@ -335,14 +335,18 @@ public class SubsonicController : ControllerBase
         var searchEndpoint = isSearch2 ? "rest/search2" : "rest/search3";
         var envelope = isSearch2 ? "searchResult2" : "searchResult3";
 
-        // Discovery belongs on the first page only. Injected rows are regenerated per
-        // request rather than held in a server-side result set, so appending them to page
-        // two hands the client the same suggestions it already scrolled past. The native
-        // search path refuses later pages for exactly this reason; do the same here and
-        // let the library page normally underneath.
-        var songOffset = int.TryParse(parameters.GetValueOrDefault("songOffset", "0"), out var so) ? so : 0;
+        var songOffset = int.TryParse(parameters.GetValueOrDefault("songOffset", "0"), out var so)
+            ? Math.Max(0, so)
+            : 0;
+        var albumOffset = int.TryParse(parameters.GetValueOrDefault("albumOffset", "0"), out var ao)
+            ? Math.Max(0, ao)
+            : 0;
+        var artistOffset = int.TryParse(parameters.GetValueOrDefault("artistOffset", "0"), out var aro)
+            ? Math.Max(0, aro)
+            : 0;
+        var isContinuationPage = songOffset > 0;
 
-        if (string.IsNullOrWhiteSpace(cleanQuery) || songOffset > 0)
+        if (string.IsNullOrWhiteSpace(cleanQuery))
         {
             try
             {
@@ -356,9 +360,15 @@ public class SubsonicController : ControllerBase
             }
         }
 
-        var requestedSongs   = int.TryParse(parameters.GetValueOrDefault("songCount",   "20"), out var sc)  ? sc  : 20;
-        var requestedAlbums  = int.TryParse(parameters.GetValueOrDefault("albumCount",  "20"), out var ac)  ? ac  : 20;
-        var requestedArtists = int.TryParse(parameters.GetValueOrDefault("artistCount", "20"), out var arc) ? arc : 20;
+        var requestedSongs = int.TryParse(parameters.GetValueOrDefault("songCount", "20"), out var sc)
+            ? Math.Max(0, sc)
+            : 20;
+        var requestedAlbums = int.TryParse(parameters.GetValueOrDefault("albumCount", "20"), out var ac)
+            ? Math.Max(0, ac)
+            : 20;
+        var requestedArtists = int.TryParse(parameters.GetValueOrDefault("artistCount", "20"), out var arc)
+            ? Math.Max(0, arc)
+            : 20;
         var searchLease = _searchRequests.Begin(SearchClientKey(parameters), cleanQuery);
 
         // Always include local results. The earlier behavior special-cased
@@ -379,22 +389,35 @@ public class SubsonicController : ControllerBase
         // but external album search was still firing a Deezer query per keystroke. Judged
         // from the song count only when the client actually asked for songs, so a genuine
         // album-only search still gets album discovery.
-        var isTypeAheadProbe = requestedSongs > 0 && externalTarget == 0;
+        var isTypeAheadProbe = !isContinuationPage
+            && requestedSongs > 0
+            && externalTarget == 0;
 
         // Local pass-through. Albums/artists always get the full requested counts;
         // song-side gets the local target.
         var localParams = new Dictionary<string, string>(parameters)
         {
             ["songCount"]   = localSongTarget.ToString(),
+            ["songOffset"]  = "0",
             ["albumCount"]  = requestedAlbums.ToString(),
             ["artistCount"] = requestedArtists.ToString(),
         };
         var localTask = _proxyService.RelaySafeAsync(searchEndpoint, localParams);
 
-        var wantsExternalAlbums = requestedAlbums > 0 && !isTypeAheadProbe;
-        var wantsExternalSongs = externalTarget > 0;
-        var wantsExternalPlaylists = _subsonicSettings.EnableExternalPlaylists;
-        var wantsExternal = wantsExternalAlbums || wantsExternalSongs || wantsExternalPlaylists;
+        var wantsExternalAlbums = requestedAlbums > 0
+            && albumOffset == 0
+            && !isTypeAheadProbe;
+        var wantsExternalArtists = requestedArtists > 0
+            && artistOffset == 0
+            && !isTypeAheadProbe;
+        var wantsExternalSongs = externalTarget > 0
+            || (isContinuationPage && requestedSongs > 0);
+        var wantsExternalPlaylists = _subsonicSettings.EnableExternalPlaylists
+            && albumOffset == 0;
+        var wantsExternal = wantsExternalAlbums
+            || wantsExternalArtists
+            || wantsExternalSongs
+            || wantsExternalPlaylists;
 
         // Local search is already in flight above. Only the catalog fan-out waits: when
         // Resonus sends ma -> mad -> mado -> madonna, the first three generations wake as
@@ -402,6 +425,7 @@ public class SubsonicController : ControllerBase
         // query share a generation and continue to ExternalSearchService's single-flight.
         var debounceWatch = System.Diagnostics.Stopwatch.StartNew();
         var latestAfterDebounce = !wantsExternal
+            || isContinuationPage
             || await _searchRequests.WaitForLatestAsync(searchLease, HttpContext.RequestAborted);
         debounceWatch.Stop();
 
@@ -438,6 +462,10 @@ public class SubsonicController : ControllerBase
             ? SearchAlbumsSafeAsync(cleanQuery, Math.Min(requestedAlbums, 20))
             : Task.FromResult(new List<Album>());
 
+        var artistTask = runExternal && wantsExternalArtists
+            ? SearchArtistsSafeAsync(cleanQuery, Math.Min(requestedArtists, 20))
+            : Task.FromResult(new List<Artist>());
+
         var externalTask = runExternal && wantsExternalSongs
             ? _externalSearch.GetAsync(cleanQuery)
             : Task.FromResult<IReadOnlyList<Song>>(Array.Empty<Song>());
@@ -461,12 +489,91 @@ public class SubsonicController : ControllerBase
         // discovery is the right answer there too, since the merge will show no locals.
         var externalWatch = System.Diagnostics.Stopwatch.StartNew();
         var built = await externalTask;
-        var externalSlice = Math.Min(
-            built.Count,
-            externalTarget + Math.Max(0, localSongTarget - localParsed.Songs.Count));
-        var externalSongs = built.Take(externalSlice).ToList();
+        var trailingLocalSongs = new List<object>();
+        List<Song> externalSongs;
+
+        if (!isContinuationPage)
+        {
+            var externalSlice = Math.Min(
+                built.Count,
+                externalTarget + Math.Max(0, localSongTarget - localParsed.Songs.Count));
+            externalSongs = built.Take(externalSlice).ToList();
+        }
+        else
+        {
+            // The virtual result order is stable across pages:
+            //   local prefix -> cached external candidates -> remaining local matches.
+            // Page one already returned part of the external set, so songOffset must be
+            // translated into an offset inside that same set rather than regenerating its
+            // beginning or falling back to a Navidrome-only page.
+            var pagePlan = SearchSongPagePlanner.Create(
+                songOffset,
+                requestedSongs,
+                localParsed.Songs.Count,
+                built.Count,
+                localTailMayExist: localSongTarget > 0
+                    && localParsed.Songs.Count == localSongTarget);
+
+            var leadingLocalSongs = localParsed.Songs
+                .Skip(pagePlan.LocalPrefixSkip)
+                .Take(pagePlan.LocalPrefixTake)
+                .ToList();
+
+            externalSongs = built
+                .Skip(pagePlan.ExternalSkip)
+                .Take(pagePlan.ExternalTake)
+                .Select(song => song.Copy())
+                .ToList();
+
+            // Rows below the original first-page enrichment boundary have only cached
+            // placeholder metadata. Enrich detached copies now so every clickable artist
+            // and album carries the exact Deezer id without mutating the shared result set.
+            if (externalSongs.Count > 0)
+            {
+                await _metadataService.EnrichExternalSearchPageAsync(
+                    externalSongs, HttpContext.RequestAborted);
+            }
+
+            if (pagePlan.LocalTailTake > 0)
+            {
+                var tailParams = new Dictionary<string, string>(parameters)
+                {
+                    ["songOffset"] = pagePlan.LocalTailOffset.ToString(),
+                    ["songCount"] = pagePlan.LocalTailTake.ToString(),
+                    ["albumCount"] = "0",
+                    ["artistCount"] = "0",
+                };
+                var tailResult = await _proxyService.RelaySafeAsync(searchEndpoint, tailParams);
+                if (tailResult.Success
+                    && tailResult.Body is { Length: > 0 }
+                    && !IsFailedSubsonicBody(tailResult.Body, tailResult.ContentType))
+                {
+                    trailingLocalSongs = _modelMapper
+                        .ParseSearchResponse(tailResult.Body, tailResult.ContentType)
+                        .Songs
+                        .Take(pagePlan.LocalTailTake)
+                        .ToList();
+                }
+            }
+
+            localParsed = (
+                Songs: leadingLocalSongs,
+                Albums: localParsed.Albums,
+                Artists: localParsed.Artists);
+
+            _logger.LogInformation(
+                "External search page '{Q}': offset={Offset} count={Count} local_prefix={LocalPrefix} external_skip={ExternalSkip} external_count={ExternalCount} local_tail={LocalTail}",
+                cleanQuery,
+                songOffset,
+                requestedSongs,
+                leadingLocalSongs.Count,
+                pagePlan.ExternalSkip,
+                externalSongs.Count,
+                trailingLocalSongs.Count);
+        }
 
         var externalAlbums = await albumTask;
+        var externalArtists = await artistTask;
         var externalPlaylists = await playlistTask;
         externalWatch.Stop();
 
@@ -476,6 +583,7 @@ public class SubsonicController : ControllerBase
         {
             externalSongs.Clear();
             externalAlbums.Clear();
+            externalArtists.Clear();
             externalPlaylists.Clear();
             _logger.LogInformation(
                 "Search coordination '{Q}': external=discarded-stale debounce_ms={DebounceMs} external_ms={ExternalMs}",
@@ -496,16 +604,19 @@ public class SubsonicController : ControllerBase
         {
             Songs = externalSongs,
             Albums = externalAlbums,
-            Artists = new List<Artist>(),
+            Artists = externalArtists,
         };
 
-        // Track this response as a "queue" so a later scrobble for any of its
-        // songs can drive the sliding-window prewarm of upcoming externals.
-        // Order matches the merged response order — local first, external after.
-        var localSongIds = ExtractLocalSongIds(localResult.Body, localResult.ContentType);
-        _radioQueueStore.Register(localSongIds.Concat(externalSongs.Select(s => s.Id)));
+        // Track this exact page as a queue so a later scrobble can drive the
+        // sliding-window prewarm. Continuation pages may have local rows on either
+        // side of discovery, so build this from the already planned response order.
+        var responseSongIds = ExtractSongIds(localParsed.Songs)
+            .Concat(externalSongs.Select(s => s.Id))
+            .Concat(ExtractSongIds(trailingLocalSongs));
+        _radioQueueStore.Register(responseSongIds);
 
-        return MergeSearchResults(localParsed, localResult.ContentType, externalResult, externalPlaylists, format, envelope);
+        return MergeSearchResults(localParsed, localResult.ContentType, externalResult,
+            externalPlaylists, format, envelope, trailingLocalSongs);
     }
 
     private async Task<List<Album>> SearchAlbumsSafeAsync(string query, int limit)
@@ -515,6 +626,16 @@ public class SubsonicController : ControllerBase
         {
             _logger.LogDebug("external album search failed for '{Q}': {M}", query, ex.Message);
             return new List<Album>();
+        }
+    }
+
+    private async Task<List<Artist>> SearchArtistsSafeAsync(string query, int limit)
+    {
+        try { return await _metadataService.SearchArtistsAsync(query, limit); }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("external artist search failed for '{Q}': {M}", query, ex.Message);
+            return new List<Artist>();
         }
     }
 
@@ -559,48 +680,26 @@ public class SubsonicController : ControllerBase
     }
 
     /// <summary>
-    /// Pulls just the song-id strings out of a Subsonic search3 response body,
-    /// preserving response order. Both JSON and XML shapes are supported because
-    /// Navidrome respects the f= parameter the proxy forwards.
+    /// Reads ids from the mapper's already-converted JSON dictionaries or XML elements.
+    /// This is used after pagination planning, where parsing the original upstream body
+    /// would describe a different page than the one Octo is about to return.
     /// </summary>
-    private static List<string> ExtractLocalSongIds(byte[]? body, string? contentType)
+    private static IEnumerable<string> ExtractSongIds(IEnumerable<object> songs)
     {
-        if (body == null || body.Length == 0) return new List<string>();
-        var ids = new List<string>();
-        try
+        foreach (var song in songs)
         {
-            if (contentType?.Contains("xml") == true)
+            if (song is Dictionary<string, object> json
+                && json.TryGetValue("id", out var idValue)
+                && idValue?.ToString() is { Length: > 0 } jsonId)
             {
-                var doc = XDocument.Load(new System.IO.MemoryStream(body));
-                var ns = doc.Root?.Name.Namespace ?? XNamespace.None;
-                var nodes = doc.Descendants(ns + "song");
-                foreach (var n in nodes)
-                {
-                    var id = n.Attribute("id")?.Value;
-                    if (!string.IsNullOrEmpty(id)) ids.Add(id);
-                }
+                yield return jsonId;
             }
-            else
+            else if (song is XElement xml
+                && xml.Attribute("id")?.Value is { Length: > 0 } xmlId)
             {
-                using var doc = JsonDocument.Parse(body);
-                if (doc.RootElement.TryGetProperty("subsonic-response", out var resp)
-                    && (resp.TryGetProperty("searchResult3", out var sr) || resp.TryGetProperty("searchResult2", out sr))
-                    && sr.TryGetProperty("song", out var songs)
-                    && songs.ValueKind == JsonValueKind.Array)
-                {
-                    foreach (var s in songs.EnumerateArray())
-                    {
-                        if (s.TryGetProperty("id", out var idEl) && idEl.ValueKind == JsonValueKind.String)
-                        {
-                            var id = idEl.GetString();
-                            if (!string.IsNullOrEmpty(id)) ids.Add(id);
-                        }
-                    }
-                }
+                yield return xmlId;
             }
         }
-        catch { /* malformed upstream response — return whatever we got */ }
-        return ids;
     }
 
     /// <summary>
@@ -1010,7 +1109,10 @@ public class SubsonicController : ControllerBase
         // result is not guaranteed to be the exact artist for short/common names.
         var candidates = await _metadataService.SearchArtistsAsync(artistName, 5);
         var wanted = NormalizeCatalogName(artistName);
-        var match = candidates.FirstOrDefault(a => NormalizeCatalogName(a.Name) == wanted);
+        var matches = candidates.Where(a => NormalizeCatalogName(a.Name) == wanted).ToList();
+        // A local artist id has no Deezer identity. Do not attach an unrelated
+        // discography when several catalog artists have the same display name.
+        var match = matches.Count == 1 ? matches[0] : null;
         if (match is null
             || string.IsNullOrWhiteSpace(match.ExternalProvider)
             || string.IsNullOrWhiteSpace(match.ExternalId))
@@ -1416,7 +1518,8 @@ public class SubsonicController : ControllerBase
         SearchResult externalResult,
         List<ExternalPlaylist> playlistResult,
         string format,
-        string envelope)
+        string envelope,
+        List<object>? trailingLocalSongs = null)
     {
         var (localSongs, localAlbums, localArtists) = local;
 
@@ -1427,7 +1530,8 @@ public class SubsonicController : ControllerBase
             localArtists,
             externalResult,
             playlistResult,
-            isJson);
+            isJson,
+            trailingLocalSongs);
 
         if (isJson)
         {

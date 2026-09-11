@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using System.Text;
+using Octo.Models.Domain;
 
 namespace Octo.Services.Soulseek;
 
@@ -26,10 +27,9 @@ public class ExternalIdRegistry
     {
         var id = MakeShortId(routing);
 
-        // A song row can mint weaker album/artist routings than catalog search did, and
-        // they hash to the same ids. Registering them must not erase the provider ids or
-        // release type already resolved. Best-effort only: losing the album-id race just
-        // sends GetAlbumAsync down its cached name-lookup fallback.
+        // Legacy/name-only routings still hash together and may be upgraded in place.
+        // Precise provider-backed routings have their own ids (see MakeShortId), so two
+        // artists named "Feel" can coexist instead of overwriting each other.
         if (_byId.TryGetValue(id, out var existing))
         {
             if (routing.ExternalAlbumId is null && existing.ExternalAlbumId is not null)
@@ -58,6 +58,35 @@ public class ExternalIdRegistry
         return null;
     }
 
+    /// <summary>
+    /// Reuses provider identity even when a client reloads the song through getSong.
+    /// An unenriched row keeps its source title on the parent links so opening the
+    /// artist can resolve that recording instead of guessing from a shared name.
+    /// </summary>
+    public (string ArtistId, string AlbumId) RegisterSongParents(Song song)
+    {
+        var source = Lookup(song.Id);
+        var album = string.IsNullOrWhiteSpace(song.Album) ? song.Title : song.Album;
+        var artistId = song.ArtistId ?? Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Artist,
+            Artist = song.Artist,
+            Title = song.Title,
+            ExternalArtistId = source?.ExternalArtistId,
+        });
+        var albumId = song.AlbumId ?? Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Album,
+            Artist = song.Artist,
+            Title = song.Title,
+            Album = album,
+            ExternalAlbumId = source?.ExternalAlbumId,
+            ExternalArtistId = source?.ExternalArtistId,
+            CoverArtUrl = song.CoverArtUrl ?? source?.CoverArtUrl,
+        });
+        return (artistId, albumId);
+    }
+
     private static string MakeShortId(SoulseekRouting r)
     {
         // Derive 22 base62 chars from sha256 of routing fields. Same input -> same id.
@@ -66,6 +95,16 @@ public class ExternalIdRegistry
         // getCoverArt would return the wrong scope's artwork.
         var seed = r.Kind switch
         {
+            RoutingKind.Song when r.Release is not null
+                => $"k:album-track|deezer:{r.Release.DeezerId}|disc:{r.DiscNumber}|track:{r.Track}|a:{r.Artist}|t:{r.Title}",
+            RoutingKind.Album when !string.IsNullOrWhiteSpace(r.ExternalAlbumId)
+                => $"k:album|deezer:{r.ExternalAlbumId}",
+            RoutingKind.Artist when !string.IsNullOrWhiteSpace(r.ExternalArtistId)
+                => $"k:artist|deezer:{r.ExternalArtistId}",
+            RoutingKind.Artist when !string.IsNullOrWhiteSpace(r.Title)
+                => $"k:artist|a:{r.Artist}|t:{r.Title}",
+            RoutingKind.Album when !string.IsNullOrWhiteSpace(r.Title)
+                => $"k:album|a:{r.Artist}|al:{r.Album}|t:{r.Title}",
             RoutingKind.Album  => $"k:album|a:{r.Artist}|al:{r.Album}",
             RoutingKind.Artist => $"k:artist|a:{r.Artist}",
             _                  => $"k:song|yt:{r.YouTubeId}|a:{r.Artist}|t:{r.Title}|d:{r.Duration}",
