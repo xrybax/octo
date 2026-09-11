@@ -111,15 +111,18 @@ public class SubsonicModelMapper
         List<object> localArtists,
         SearchResult externalResult,
         List<ExternalPlaylist> externalPlaylists,
-        bool isJson)
+        bool isJson,
+        List<object>? trailingLocalSongs = null)
     {
         if (isJson)
         {
-            return MergeSearchResultsJson(localSongs, localAlbums, localArtists, externalResult, externalPlaylists);
+            return MergeSearchResultsJson(localSongs, localAlbums, localArtists,
+                externalResult, externalPlaylists, trailingLocalSongs);
         }
         else
         {
-            return MergeSearchResultsXml(localSongs, localAlbums, localArtists, externalResult, externalPlaylists);
+            return MergeSearchResultsXml(localSongs, localAlbums, localArtists,
+                externalResult, externalPlaylists, trailingLocalSongs);
         }
     }
 
@@ -128,7 +131,8 @@ public class SubsonicModelMapper
         List<object> localAlbums,
         List<object> localArtists,
         SearchResult externalResult,
-        List<ExternalPlaylist> externalPlaylists)
+        List<ExternalPlaylist> externalPlaylists,
+        List<object>? trailingLocalSongs)
     {
         // Local songs first, external (YouTube placeholder) after. The earlier
         // version flipped this to put externals first because Arpeggi's "play
@@ -139,6 +143,7 @@ public class SubsonicModelMapper
         // suggestions following.
         var mergedSongs = localSongs
             .Concat(externalResult.Songs.Select(s => _responseBuilder.ConvertSongToJson(s)))
+            .Concat(trailingLocalSongs ?? Enumerable.Empty<object>())
             .ToList();
         
         // Albums, deduplicated by artist+name so an album you own is not listed twice.
@@ -188,7 +193,8 @@ public class SubsonicModelMapper
         List<object> localAlbums,
         List<object> localArtists,
         SearchResult externalResult,
-        List<ExternalPlaylist> externalPlaylists)
+        List<ExternalPlaylist> externalPlaylists,
+        List<object>? trailingLocalSongs)
     {
         var ns = XNamespace.Get("http://subsonic.org/restapi");
         
@@ -248,6 +254,11 @@ public class SubsonicModelMapper
         foreach (var song in externalResult.Songs)
         {
             mergedSongs.Add(_responseBuilder.ConvertSongToXml(song, ns));
+        }
+        foreach (var song in (trailingLocalSongs ?? new List<object>()).Cast<XElement>())
+        {
+            song.Name = ns + "song";
+            mergedSongs.Add(song);
         }
 
         return (mergedSongs, mergedAlbums, mergedArtists);

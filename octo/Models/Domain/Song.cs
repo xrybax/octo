@@ -6,6 +6,18 @@ namespace Octo.Models.Domain;
 public class Song
 {
     /// <summary>
+    /// Creates a detached copy suitable for per-request metadata enrichment. External
+    /// search results are cached and shared between pagination requests, so a later page
+    /// must never mutate the frozen instance another response may be serializing.
+    /// </summary>
+    public Song Copy()
+    {
+        var copy = (Song)MemberwiseClone();
+        copy.Contributors = new List<string>(Contributors);
+        return copy;
+    }
+
+    /// <summary>
     /// Unique ID. For external songs, prefixed with "ext-" + provider + "-" + external id
     /// Example: "ext-deezer-123456" or "local-789"
     /// </summary>
@@ -95,4 +107,3 @@ public class Song
     /// </summary>
     public int? ExplicitContentLyrics { get; set; }
 }
-

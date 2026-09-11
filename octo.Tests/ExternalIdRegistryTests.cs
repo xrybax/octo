@@ -50,7 +50,7 @@ public class ExternalIdRegistryTests
     }
 
     [Fact]
-    public void Register_AlbumWithoutDeezerId_DoesNotClobberKnownExternalAlbumId()
+    public void Register_NameOnlyAlbum_DoesNotAliasProviderBackedAlbum()
     {
         // Arrange: an album search registers the precise Deezer id.
         var fromSearch = new SoulseekRouting
@@ -62,32 +62,31 @@ public class ExternalIdRegistryTests
         };
         var id = _registry.Register(fromSearch);
 
-        // Act: a song row later mints the same artist+album with no Deezer id. It hashes
-        // to the same key, so a naive overwrite would drop the id we already resolved.
+        // Act: a legacy song row later mints the same artist+album with no Deezer id.
         var fromSongRow = new SoulseekRouting
         {
             Kind = RoutingKind.Album,
             Artist = "Radiohead",
             Album = "In Rainbows",
         };
-        var sameId = _registry.Register(fromSongRow);
+        var weakId = _registry.Register(fromSongRow);
 
         // Assert
-        Assert.Equal(id, sameId);
+        Assert.NotEqual(id, weakId);
         Assert.Equal("14880659", _registry.Lookup(id)!.ExternalAlbumId);
+        Assert.Null(_registry.Lookup(weakId)!.ExternalAlbumId);
     }
 
     [Fact]
-    public void Register_AlbumWithDeezerId_OverwritesAnEarlierUnknownId()
+    public void Register_ProviderBackedAlbum_DoesNotOverwriteLegacyNameOnlyRoute()
     {
-        // The preserve must only fill blanks, never block a real update.
-        var id = _registry.Register(new SoulseekRouting
+        var weakId = _registry.Register(new SoulseekRouting
         {
             Kind = RoutingKind.Album, Artist = "Radiohead", Album = "In Rainbows"
         });
-        Assert.Null(_registry.Lookup(id)!.ExternalAlbumId);
+        Assert.Null(_registry.Lookup(weakId)!.ExternalAlbumId);
 
-        _registry.Register(new SoulseekRouting
+        var strongId = _registry.Register(new SoulseekRouting
         {
             Kind = RoutingKind.Album,
             Artist = "Radiohead",
@@ -95,7 +94,9 @@ public class ExternalIdRegistryTests
             ExternalAlbumId = "14880659",
         });
 
-        Assert.Equal("14880659", _registry.Lookup(id)!.ExternalAlbumId);
+        Assert.NotEqual(weakId, strongId);
+        Assert.Null(_registry.Lookup(weakId)!.ExternalAlbumId);
+        Assert.Equal("14880659", _registry.Lookup(strongId)!.ExternalAlbumId);
     }
 
     [Fact]
@@ -115,8 +116,9 @@ public class ExternalIdRegistryTests
         var sameId = _registry.Register(new SoulseekRouting
         {
             Kind = RoutingKind.Album,
-            Artist = "Radiohead",
-            Album = "In Rainbows",
+            Artist = "RADIOHEAD",
+            Album = "Alternate display title",
+            ExternalAlbumId = "14880659",
         });
 
         Assert.Equal(id, sameId);
@@ -128,22 +130,68 @@ public class ExternalIdRegistryTests
     }
 
     [Fact]
-    public void Register_ArtistWithoutDeezerId_DoesNotClobberKnownId()
+    public void Register_SameProviderArtistId_PreservesKnownMetadata()
     {
         var id = _registry.Register(new SoulseekRouting
         {
             Kind = RoutingKind.Artist,
             Artist = "Radiohead",
             ExternalArtistId = "399",
+            CoverArtUrl = "https://cdn/radiohead.jpg",
         });
 
-        _registry.Register(new SoulseekRouting
+        var sameId = _registry.Register(new SoulseekRouting
         {
             Kind = RoutingKind.Artist,
-            Artist = "Radiohead",
+            Artist = "RADIOHEAD",
+            ExternalArtistId = "399",
         });
 
+        Assert.Equal(id, sameId);
         Assert.Equal("399", _registry.Lookup(id)!.ExternalArtistId);
+        Assert.Equal("https://cdn/radiohead.jpg", _registry.Lookup(id)!.CoverArtUrl);
+    }
+
+    [Fact]
+    public void Register_SameArtistNameWithDifferentProviderIds_ProducesDifferentIds()
+    {
+        var first = _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Artist,
+            Artist = "Feel",
+            ExternalArtistId = "111",
+        });
+        var second = _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Artist,
+            Artist = "Feel",
+            ExternalArtistId = "222",
+        });
+
+        Assert.NotEqual(first, second);
+        Assert.Equal("111", _registry.Lookup(first)!.ExternalArtistId);
+        Assert.Equal("222", _registry.Lookup(second)!.ExternalArtistId);
+    }
+
+    [Fact]
+    public void Register_SameAlbumNameWithDifferentProviderIds_ProducesDifferentIds()
+    {
+        var first = _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Album,
+            Artist = "Feel",
+            Album = "Feel",
+            ExternalAlbumId = "333",
+        });
+        var second = _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Album,
+            Artist = "Feel",
+            Album = "Feel",
+            ExternalAlbumId = "444",
+        });
+
+        Assert.NotEqual(first, second);
     }
 
     [Fact]

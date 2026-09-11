@@ -18,7 +18,8 @@ namespace Octo.Services.Metadata;
 public class DeezerMetadataService : IDisposable
 {
     public record TrackMeta(string? AlbumTitle, string? AlbumCoverUrl, int? Year, int? Duration,
-        string? ArtistName, string? ArtistImageUrl);
+        string? ArtistName, string? ArtistImageUrl, string? AlbumDeezerId,
+        string? ArtistDeezerId);
     public record ArtistMeta(string? Name, string? ImageUrl);
 
     /// <summary>One artist catalog match. DeezerId is kept server-side and later
@@ -165,6 +166,7 @@ public class DeezerMetadataService : IDisposable
             if (FirstData(r.Doc) is JsonElement t)
             {
                 string? albTitle = null, cover = null, artName = null, artImg = null;
+                string? artistId = null;
                 long albId = 0;
                 if (t.TryGetProperty("album", out var alb))
                 {
@@ -177,6 +179,7 @@ public class DeezerMetadataService : IDisposable
                 {
                     artName = Str(art, "name");
                     artImg = Str(art, "picture_xl") ?? Str(art, "picture_medium");
+                    artistId = Identifier(art, "id");
                 }
                 int? duration = t.TryGetProperty("duration", out var du) && du.ValueKind == JsonValueKind.Number
                     ? du.GetInt32() : null;
@@ -189,7 +192,15 @@ public class DeezerMetadataService : IDisposable
                     if (yearTransient) return null;
                     year = y;
                 }
-                meta = new TrackMeta(albTitle, cover, year, duration, artName, artImg);
+                meta = new TrackMeta(
+                    albTitle,
+                    cover,
+                    year,
+                    duration,
+                    artName,
+                    artImg,
+                    albId > 0 ? albId.ToString() : null,
+                    artistId);
             }
         }
         catch (Exception ex)
@@ -284,6 +295,51 @@ public class DeezerMetadataService : IDisposable
         catch (Exception ex)
         {
             _logger.LogDebug("deezer enrich artist '{A}' failed: {M}", artist, ex.Message);
+        }
+
+        Put(key, meta, meta is null ? NegativeTtl : PositiveTtl);
+        return meta;
+    }
+
+    /// <summary>
+    /// Loads one exact Deezer artist. Name search is intentionally kept as a fallback
+    /// for legacy routings, but a search result or enriched track already knows the
+    /// provider id and must not be allowed to drift to a different artist with the same
+    /// display name.
+    /// </summary>
+    public async Task<ArtistMeta?> EnrichArtistByIdAsync(string? deezerId,
+        CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(deezerId)) return null;
+        var key = $"aid|{deezerId}";
+        if (TryGetCached<ArtistMeta?>(key, out var cached)) return cached;
+
+        ArtistMeta? meta = null;
+        try
+        {
+            using var r = await GetJsonAsync($"{Base}/artist/{Uri.EscapeDataString(deezerId)}", ct);
+            if (r.Transient) return null;
+            if (r.Doc is not null)
+            {
+                var artist = r.Doc.RootElement;
+                if (artist.ValueKind == JsonValueKind.Object
+                    && !artist.TryGetProperty("error", out _))
+                {
+                    var name = Str(artist, "name");
+                    if (!string.IsNullOrWhiteSpace(name))
+                    {
+                        meta = new ArtistMeta(
+                            name,
+                            Str(artist, "picture_xl")
+                            ?? Str(artist, "picture_big")
+                            ?? Str(artist, "picture_medium"));
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug("deezer artist {Id} failed: {M}", deezerId, ex.Message);
         }
 
         Put(key, meta, meta is null ? NegativeTtl : PositiveTtl);

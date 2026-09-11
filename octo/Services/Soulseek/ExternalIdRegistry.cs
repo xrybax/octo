@@ -26,10 +26,9 @@ public class ExternalIdRegistry
     {
         var id = MakeShortId(routing);
 
-        // A song row can mint weaker album/artist routings than catalog search did, and
-        // they hash to the same ids. Registering them must not erase the provider ids or
-        // release type already resolved. Best-effort only: losing the album-id race just
-        // sends GetAlbumAsync down its cached name-lookup fallback.
+        // Legacy/name-only routings still hash together and may be upgraded in place.
+        // Precise provider-backed routings have their own ids (see MakeShortId), so two
+        // artists named "Feel" can coexist instead of overwriting each other.
         if (_byId.TryGetValue(id, out var existing))
         {
             if (routing.ExternalAlbumId is null && existing.ExternalAlbumId is not null)
@@ -66,6 +65,10 @@ public class ExternalIdRegistry
         // getCoverArt would return the wrong scope's artwork.
         var seed = r.Kind switch
         {
+            RoutingKind.Album when !string.IsNullOrWhiteSpace(r.ExternalAlbumId)
+                => $"k:album|deezer:{r.ExternalAlbumId}",
+            RoutingKind.Artist when !string.IsNullOrWhiteSpace(r.ExternalArtistId)
+                => $"k:artist|deezer:{r.ExternalArtistId}",
             RoutingKind.Album  => $"k:album|a:{r.Artist}|al:{r.Album}",
             RoutingKind.Artist => $"k:artist|a:{r.Artist}",
             _                  => $"k:song|yt:{r.YouTubeId}|a:{r.Artist}|t:{r.Title}|d:{r.Duration}",

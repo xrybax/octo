@@ -46,14 +46,16 @@ public sealed class ExternalSearchServiceTests
                 It.IsAny<IEnumerable<Song>>(), 12, It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
-        var service = new ExternalSearchService(
+        using var service = new ExternalSearchService(
             metadata.Object,
             new Mock<ILogger<ExternalSearchService>>().Object,
             lastFm);
 
         var songs = await service.GetAsync("nergal");
+        var continuation = await service.GetAsync(" NERGAL ");
 
         Assert.Equal(50, songs.Count);
+        Assert.Same(songs, continuation);
         Assert.Equal(1, handler.TrackSearchCalls);
         Assert.Equal(0, handler.TopTracksCalls);
         metadata.Verify(m => m.EnrichExternalSongsAsync(

@@ -107,9 +107,26 @@ public class SoulseekMetadataService : IMusicMetadataService
     public async Task EnrichExternalSongsAsync(List<Song> songs, CancellationToken ct = default)
     {
         var external = songs.Where(s => !s.IsLocal).ToList();
+        await EnrichExternalSongsCoreAsync(external, SearchEnrichLimit, ct);
 
+        WarmRemainingInBackground(external
+            .Skip(SearchEnrichLimit)
+            .Take(BackgroundEnrichLimit - SearchEnrichLimit)
+            .ToList());
+    }
+
+    public async Task EnrichExternalSearchPageAsync(List<Song> songs,
+        CancellationToken ct = default)
+    {
+        var external = songs.Where(s => !s.IsLocal).ToList();
+        await EnrichExternalSongsCoreAsync(external, external.Count, ct);
+    }
+
+    private async Task EnrichExternalSongsCoreAsync(List<Song> external, int limit,
+        CancellationToken ct)
+    {
         var sem = new SemaphoreSlim(8);
-        var tasks = external.Take(SearchEnrichLimit).Select(async song =>
+        var tasks = external.Take(limit).Select(async song =>
         {
             await sem.WaitAsync(ct);
             try
@@ -121,6 +138,8 @@ public class SoulseekMetadataService : IMusicMetadataService
                 if (meta.Duration is int d && d > 0) song.Duration = d;
                 if (!string.IsNullOrWhiteSpace(meta.AlbumTitle)) song.Album = meta.AlbumTitle;
                 if (meta.Year is int y) song.Year = y;
+                if (!string.IsNullOrWhiteSpace(meta.AlbumCoverUrl))
+                    song.CoverArtUrl = meta.AlbumCoverUrl;
 
                 // Reflect onto the shared routing so getSong stays consistent.
                 var routing = _idRegistry.Lookup(song.Id);
@@ -128,14 +147,50 @@ public class SoulseekMetadataService : IMusicMetadataService
                 {
                     if (meta.Duration is int rd && rd > 0) routing.Duration = rd;
                     if (!string.IsNullOrWhiteSpace(meta.AlbumTitle)) routing.Album = meta.AlbumTitle;
+                    if (!string.IsNullOrWhiteSpace(meta.AlbumDeezerId))
+                        routing.ExternalAlbumId = meta.AlbumDeezerId;
+                    if (!string.IsNullOrWhiteSpace(meta.ArtistDeezerId))
+                        routing.ExternalArtistId = meta.ArtistDeezerId;
+                    if (!string.IsNullOrWhiteSpace(meta.AlbumCoverUrl))
+                        routing.CoverArtUrl = meta.AlbumCoverUrl;
+                }
+
+                // A song row used to mint artist/album ids from display names only.
+                // Carry the exact Deezer ids into those child links so opening "Feel"
+                // cannot drift to another artist or release with the same name.
+                if (!string.IsNullOrWhiteSpace(meta.ArtistDeezerId))
+                {
+                    song.ArtistId = _idRegistry.Register(new SoulseekRouting
+                    {
+                        Kind = RoutingKind.Artist,
+                        Artist = string.IsNullOrWhiteSpace(meta.ArtistName)
+                            ? song.Artist
+                            : meta.ArtistName,
+                        ExternalArtistId = meta.ArtistDeezerId,
+                        CoverArtUrl = meta.ArtistImageUrl,
+                    });
+                }
+
+                if (!string.IsNullOrWhiteSpace(meta.AlbumDeezerId)
+                    && !string.IsNullOrWhiteSpace(song.Album))
+                {
+                    song.AlbumId = _idRegistry.Register(new SoulseekRouting
+                    {
+                        Kind = RoutingKind.Album,
+                        Artist = string.IsNullOrWhiteSpace(meta.ArtistName)
+                            ? song.Artist
+                            : meta.ArtistName,
+                        Album = song.Album,
+                        ExternalAlbumId = meta.AlbumDeezerId,
+                        ExternalArtistId = meta.ArtistDeezerId,
+                        CoverArtUrl = meta.AlbumCoverUrl,
+                    });
                 }
             }
             catch { /* best-effort; a miss just leaves the 180s fallback */ }
             finally { sem.Release(); }
         });
         await Task.WhenAll(tasks);
-
-        WarmRemainingInBackground(external.Skip(SearchEnrichLimit).Take(BackgroundEnrichLimit - SearchEnrichLimit).ToList());
     }
 
     /// <summary>
@@ -288,7 +343,16 @@ public class SoulseekMetadataService : IMusicMetadataService
     {
         if (string.IsNullOrWhiteSpace(query) || limit <= 0) return new List<Artist>();
 
-        var hits = await _deezer.SearchArtistsAsync(query, limit);
+        var hits = await _deezer.SearchArtistsAsync(query, Math.Min(100, Math.Max(limit, 20)));
+        var wanted = query.Trim();
+        hits = hits
+            .OrderByDescending(hit => string.Equals(
+                hit.Name.Trim(), wanted, StringComparison.OrdinalIgnoreCase))
+            .ThenByDescending(hit => hit.AlbumCount ?? -1)
+            .GroupBy(hit => hit.Name.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .Take(limit)
+            .ToList();
         var artists = new List<Artist>(hits.Count);
         foreach (var hit in hits)
         {
@@ -537,7 +601,9 @@ public class SoulseekMetadataService : IMusicMetadataService
         var routing = _idRegistry.Lookup(externalId);
         if (routing is null || routing.Kind != RoutingKind.Artist) return null;
 
-        var meta = await _deezer.EnrichArtistAsync(routing.Artist);
+        var meta = !string.IsNullOrWhiteSpace(routing.ExternalArtistId)
+            ? await _deezer.EnrichArtistByIdAsync(routing.ExternalArtistId)
+            : await _deezer.EnrichArtistAsync(routing.Artist);
         if (!string.IsNullOrWhiteSpace(meta?.ImageUrl))
         {
             routing.CoverArtUrl = meta.ImageUrl;
@@ -567,9 +633,13 @@ public class SoulseekMetadataService : IMusicMetadataService
         {
             // Older registry entries and artist ids minted from a song do not know the
             // Deezer id yet. Resolve it once, then upgrade the shared routing in-place.
-            var candidates = await _deezer.SearchArtistsAsync(routing.Artist, 5);
-            var match = candidates.FirstOrDefault(a =>
-                string.Equals(a.Name, routing.Artist, StringComparison.OrdinalIgnoreCase));
+            var artistName = routing.Artist;
+            var candidates = await _deezer.SearchArtistsAsync(artistName, 20);
+            var match = candidates
+                .Where(a => string.Equals(
+                    a.Name.Trim(), artistName.Trim(), StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(a => a.AlbumCount ?? -1)
+                .FirstOrDefault();
             if (match is null) return new List<Album>();
 
             deezerArtistId = match.DeezerId;
@@ -684,12 +754,13 @@ public class SoulseekRouting
     public string? Album { get; set; }
     public int? Duration { get; set; }
 
-    /// <summary>Deezer album id, when an album search resolved one. Absent on album
-    /// routings minted from a song row, which fall back to a name lookup.</summary>
+    /// <summary>Deezer album id, when album search or track enrichment resolved one.
+    /// Legacy/un-enriched song rows may still fall back to a name lookup.</summary>
     public string? ExternalAlbumId { get; set; }
 
-    /// <summary>Deezer artist id resolved from artist/album search. The public Subsonic
-    /// id remains the short registry id; this value is only used for metadata calls.</summary>
+    /// <summary>Deezer artist id resolved from artist/album search or track enrichment.
+    /// The public Subsonic id remains the short registry id; this value is only used for
+    /// identity and metadata calls.</summary>
     public string? ExternalArtistId { get; set; }
 
     /// <summary>OpenSubsonic release type derived from Deezer's record_type.</summary>

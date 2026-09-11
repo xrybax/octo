@@ -77,7 +77,7 @@ public class SoulseekMetadataServiceTests
     private const string TrackSearchJson = @"{""data"":[
         {""id"":100,""title"":""Test Track"",""duration"":205,
          ""album"":{""id"":99,""title"":""Test Album"",""cover_xl"":""https://cdn/track.jpg""},
-         ""artist"":{""name"":""Test Artist""}}]}";
+         ""artist"":{""id"":42,""name"":""Test Artist"",""picture_xl"":""https://cdn/artist.jpg""}}]}";
 
     [Fact]
     public async Task SearchEnrichmentSkipsPerTrackAlbumYearRequest()
@@ -95,6 +95,100 @@ public class SoulseekMetadataServiceTests
         Assert.Equal(205, song.Duration);
         Assert.Null(song.Year);
         Assert.DoesNotContain("/album/99", requested);
+
+        Assert.NotNull(song.ArtistId);
+        Assert.NotNull(song.AlbumId);
+        Assert.Equal("42", _registry.Lookup(song.ArtistId!)!.ExternalArtistId);
+        Assert.Equal("99", _registry.Lookup(song.AlbumId!)!.ExternalAlbumId);
+        Assert.Equal("42", _registry.Lookup(song.AlbumId!)!.ExternalArtistId);
+
+        var songRouting = _registry.Lookup(song.Id)!;
+        Assert.Equal("42", songRouting.ExternalArtistId);
+        Assert.Equal("99", songRouting.ExternalAlbumId);
+    }
+
+    [Fact]
+    public async Task ContinuationPage_EnrichesEveryDisplayedRowBeyondFirstPageLimit()
+    {
+        var svc = BuildService(new() { ["/search?"] = TrackSearchJson });
+        var songs = new List<Octo.Models.Domain.Song>();
+        for (var i = 1; i <= 20; i++)
+        {
+            songs.Add(Assert.Single(await svc.SearchSongsByArtistTitleAsync(
+                "Test Artist", $"Track {i}")));
+        }
+
+        await svc.EnrichExternalSearchPageAsync(songs);
+
+        Assert.All(songs, song =>
+        {
+            Assert.NotNull(song.ArtistId);
+            Assert.NotNull(song.AlbumId);
+            Assert.Equal("42", _registry.Lookup(song.ArtistId!)!.ExternalArtistId);
+            Assert.Equal("99", _registry.Lookup(song.AlbumId!)!.ExternalAlbumId);
+        });
+    }
+
+    [Fact]
+    public async Task AlbumOpenedFromSearchSong_UsesExactProviderIdAndReturnsFullTracklist()
+    {
+        var requested = new List<string>();
+        var svc = BuildService(new()
+        {
+            ["/album/99/tracks"] = AlbumTracksJson,
+            ["/album/99"] = AlbumDetailJson,
+            ["/search?"] = TrackSearchJson,
+        }, uri => requested.Add(uri.ToString()));
+        var song = Assert.Single(await svc.SearchSongsByArtistTitleAsync(
+            "Test Artist", "Test Track"));
+        await svc.EnrichExternalSongsAsync(new List<Octo.Models.Domain.Song> { song });
+
+        var album = await svc.GetAlbumAsync(
+            SoulseekMetadataService.ProviderName, song.AlbumId!);
+
+        Assert.NotNull(album);
+        Assert.Equal(2, album!.Songs.Count);
+        Assert.Contains(requested, url => url.Contains("/album/99", StringComparison.Ordinal));
+        Assert.DoesNotContain(requested,
+            url => url.Contains("/search/album", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task SearchArtists_DuplicateNamesPreferExactArtistWithLargestCatalog()
+    {
+        const string ambiguousArtists = @"{""data"":[
+            {""id"":1,""name"":""Feel Good"",""nb_album"":100},
+            {""id"":2,""name"":""Feel"",""nb_album"":1},
+            {""id"":3,""name"":""FEEL"",""nb_album"":6}
+        ]}";
+        var svc = BuildService(new() { ["/search/artist"] = ambiguousArtists });
+
+        var artist = Assert.Single(await svc.SearchArtistsAsync("Feel", 1));
+
+        Assert.Equal("FEEL", artist.Name);
+        Assert.Equal("3", _registry.Lookup(artist.Id)!.ExternalArtistId);
+    }
+
+    [Fact]
+    public async Task GetArtistAsync_UsesExactProviderIdInsteadOfRepeatingNameSearch()
+    {
+        const string exactArtist = @"{""id"":42,""name"":""Exact Artist"",
+            ""picture_xl"":""https://cdn/exact.jpg""}";
+        var requested = new List<string>();
+        var svc = BuildService(new()
+        {
+            ["/artist/42"] = exactArtist,
+            ["/search/artist"] = ArtistSearchJson,
+        }, uri => requested.Add(uri.AbsolutePath));
+        var searchHit = Assert.Single(await svc.SearchArtistsAsync("Test Artist", 1));
+
+        var artist = await svc.GetArtistAsync(SoulseekMetadataService.ProviderName, searchHit.Id);
+
+        Assert.NotNull(artist);
+        Assert.Equal("Exact Artist", artist!.Name);
+        Assert.Equal("https://cdn/exact.jpg", artist.ImageUrl);
+        Assert.Contains("/artist/42", requested);
+        Assert.Single(requested.Where(path => path == "/search/artist"));
     }
 
     [Fact]

@@ -39,6 +39,16 @@ public interface IMusicMetadataService
         => Task.CompletedTask;
 
     /// <summary>
+    /// Enriches every external song that is about to be rendered on a continuation
+    /// search page. The normal first-page build deliberately enriches only its visible
+    /// prefix; later pages need their own exact album/artist ids before the client can
+    /// open those entities. Providers without a separate bulk strategy may reuse the
+    /// ordinary enrichment implementation.
+    /// </summary>
+    Task EnrichExternalSearchPageAsync(List<Song> songs, CancellationToken ct = default)
+        => EnrichExternalSongsAsync(songs, ct);
+
+    /// <summary>
     /// Resolves the real YouTube video (and its duration) for the top of a search
     /// result so the shown length matches the audio that plays. Bounded + cached;
     /// also stores the videoId so playback reuses the same video.
