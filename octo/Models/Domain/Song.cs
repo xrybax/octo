@@ -28,6 +28,7 @@ public class Song
     public string? ArtistId { get; set; }
     public string Album { get; set; } = string.Empty;
     public string? AlbumId { get; set; }
+    public AlbumReleaseMetadata? Release { get; set; }
     public int? Duration { get; set; } // In seconds
     public int? Track { get; set; }
     public int? DiscNumber { get; set; }

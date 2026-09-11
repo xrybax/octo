@@ -109,6 +109,48 @@ public class SoulseekMetadataServiceTests
     }
 
     [Fact]
+    public async Task AlbumDownloadReload_PreservesSharedReleaseAndSeparatesOtherEditions()
+    {
+        var svc = BuildService(new()
+        {
+            ["/album/1/tracks"] = AlbumTracksJson,
+            ["/album/1"] = AlbumDetailJson,
+            ["/album/2/tracks"] = AlbumTracksJson,
+            ["/album/2"] = AlbumDetailJson.Replace("Test Album", "Best Of").Replace("1997", "2024"),
+        });
+        var firstId = _registry.Register(new SoulseekRouting
+            { Kind = RoutingKind.Album, Artist = "Test Artist", Album = "Test Album", ExternalAlbumId = "1" });
+        var secondId = _registry.Register(new SoulseekRouting
+            { Kind = RoutingKind.Album, Artist = "Test Artist", Album = "Best Of", ExternalAlbumId = "2" });
+        var first = (await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, firstId))!;
+        var second = (await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, secondId))!;
+
+        Assert.Empty(first.Songs.Select(s => s.Id).Intersect(second.Songs.Select(s => s.Id)));
+        foreach (var album in new[] { first, second })
+        foreach (var original in album.Songs)
+        {
+            var reloaded = (await svc.GetSongAsync(SoulseekMetadataService.ProviderName, original.Id))!;
+            Assert.Equal(album.Title, reloaded.Album);
+            Assert.Equal(album.Artist, reloaded.AlbumArtist);
+            Assert.Equal(album.Year, reloaded.Year);
+            Assert.Equal(album.CoverArtUrl, reloaded.CoverArtUrlLarge);
+            Assert.Equal(album.Songs.Count, reloaded.TotalTracks);
+            Assert.Equal(original.Track, reloaded.Track);
+            Assert.Equal(original.DiscNumber, reloaded.DiscNumber);
+            Assert.NotNull(reloaded.Release);
+        }
+        // The same snapshot can restore an evicted routing without changing its id.
+        var track = second.Songs[0];
+        var restored = new ExternalIdRegistry().Register(new SoulseekRouting
+        {
+            Artist = track.Artist, Title = track.Title, Album = track.Album,
+            Duration = track.Duration, Track = track.Track, DiscNumber = track.DiscNumber,
+            Release = track.Release,
+        });
+        Assert.Equal(track.Id, restored);
+    }
+
+    [Fact]
     public async Task ContinuationPage_EnrichesEveryDisplayedRowBeyondFirstPageLimit()
     {
         var svc = BuildService(new() { ["/search?"] = TrackSearchJson });

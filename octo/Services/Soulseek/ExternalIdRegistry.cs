@@ -95,6 +95,8 @@ public class ExternalIdRegistry
         // getCoverArt would return the wrong scope's artwork.
         var seed = r.Kind switch
         {
+            RoutingKind.Song when r.Release is not null
+                => $"k:album-track|deezer:{r.Release.DeezerId}|disc:{r.DiscNumber}|track:{r.Track}|a:{r.Artist}|t:{r.Title}",
             RoutingKind.Album when !string.IsNullOrWhiteSpace(r.ExternalAlbumId)
                 => $"k:album|deezer:{r.ExternalAlbumId}",
             RoutingKind.Artist when !string.IsNullOrWhiteSpace(r.ExternalArtistId)

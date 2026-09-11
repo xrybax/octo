@@ -465,10 +465,13 @@ public class SoulseekMetadataService : IMusicMetadataService
             TotalTracks = routing.TotalTracks,
             Duration = routing.Duration,
             CoverArtUrl = routing.CoverArtUrl,
+            Release = routing.Release,
+            Isrc = routing.Isrc,
             IsLocal = false,
             ExternalProvider = ProviderName,
             ExternalId = externalId
         };
+        song.Release?.ApplyTo(song);
         (song.ArtistId, song.AlbumId) = _idRegistry.RegisterSongParents(song);
         return Task.FromResult<Song?>(song);
     }
@@ -556,8 +559,14 @@ public class SoulseekMetadataService : IMusicMetadataService
         if (detail.Tracks.Count > 0) album.SongCount = detail.Tracks.Count;
         if (!string.IsNullOrWhiteSpace(detail.Artist)) album.Artist = detail.Artist;
 
+        var release = new AlbumReleaseMetadata(deezerAlbumId, routing.ExternalArtistId,
+            album.Title, album.Artist, album.Year, album.Genre, album.CoverArtUrl,
+            detail.Label, detail.Tracks.Count);
+
         foreach (var track in detail.Tracks)
         {
+            var trackNumber = track.TrackPosition ?? album.Songs.Count + 1;
+            var discNumber = track.DiscNumber ?? 1;
             // Album is carried on the ROUTING as well as the Song. The download path
             // re-resolves each track by id through GetSongAsync, and without this the
             // tagger re-derives the album from artist+title alone, which for a well
@@ -569,9 +578,11 @@ public class SoulseekMetadataService : IMusicMetadataService
                 Title = track.Title,
                 Album = detail.Title,
                 Duration = track.Duration,
-                Track = track.TrackPosition,
-                DiscNumber = track.DiscNumber,
+                Track = trackNumber,
+                DiscNumber = discNumber,
                 TotalTracks = detail.Tracks.Count,
+                Release = release,
+                Isrc = track.Isrc,
                 ExternalAlbumId = deezerAlbumId,
                 ExternalArtistId = string.Equals(track.Artist, album.Artist, StringComparison.OrdinalIgnoreCase)
                     ? routing.ExternalArtistId : null,
@@ -586,9 +597,11 @@ public class SoulseekMetadataService : IMusicMetadataService
                 ArtistId = artistId,
                 Album = detail.Title,
                 AlbumId = externalId,
+                Release = release,
+                TotalTracks = detail.Tracks.Count,
                 Duration = track.Duration,
-                Track = track.TrackPosition,
-                DiscNumber = track.DiscNumber,
+                Track = trackNumber,
+                DiscNumber = discNumber,
                 Isrc = track.Isrc,
                 Year = detail.Year,
                 Genre = detail.Genre,
@@ -773,6 +786,8 @@ public enum RoutingKind
 
 public class SoulseekRouting
 {
+    public AlbumReleaseMetadata? Release { get; set; }
+    public string? Isrc { get; set; }
     public RoutingKind Kind { get; set; } = RoutingKind.Song;
     public string? YouTubeId { get; set; }
     public string? Artist { get; set; }
