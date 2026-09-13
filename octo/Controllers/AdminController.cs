@@ -33,6 +33,9 @@ public class AdminController : ControllerBase
     private readonly IOptionsMonitor<LastFmSettings> _lastFmOpts;
     private readonly IOptionsMonitor<NotificationSettings> _notificationOpts;
     private readonly IOptionsMonitor<MetadataSettings> _metadataOpts;
+    private readonly IOptionsMonitor<ServerSettings> _serverOpts;
+    private readonly IOptionsMonitor<ListenBrainzSettings>? _listenBrainzOpts;
+    private readonly Octo.Services.ListenBrainz.ListenBrainzService? _listenBrainz;
     private readonly Octo.Services.Notifications.NotificationService _notifications;
     private readonly IConfiguration _config;
     private readonly SoulseekClient _slskd;
@@ -48,6 +51,8 @@ public class AdminController : ControllerBase
     private readonly IHttpClientFactory _httpFactory;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<AdminController> _logger;
+    private readonly LastFmRadioStateStore? _radioState;
+    private readonly LastFmRadioRefreshQueue? _radioRefresh;
 
     public AdminController(
         SettingsFileWriter settings,
@@ -57,6 +62,7 @@ public class AdminController : ControllerBase
         IOptionsMonitor<LastFmSettings> lastFmOpts,
         IOptionsMonitor<NotificationSettings> notificationOpts,
         IOptionsMonitor<MetadataSettings> metadataOpts,
+        IOptionsMonitor<ServerSettings> serverOpts,
         Octo.Services.Notifications.NotificationService notifications,
         IConfiguration config,
         SoulseekClient slskd,
@@ -71,8 +77,14 @@ public class AdminController : ControllerBase
         Octo.Services.CoverArt.CoverArtAggregator coverArt,
         IHttpClientFactory httpFactory,
         IHostApplicationLifetime lifetime,
-        ILogger<AdminController> logger)
+        ILogger<AdminController> logger,
+        LastFmRadioStateStore? radioState = null,
+        LastFmRadioRefreshQueue? radioRefresh = null,
+        IOptionsMonitor<ListenBrainzSettings>? listenBrainzOpts = null,
+        Octo.Services.ListenBrainz.ListenBrainzService? listenBrainz = null)
     {
+        _listenBrainzOpts = listenBrainzOpts;
+        _listenBrainz = listenBrainz;
         _deezer = deezer;
         _coverArt = coverArt;
         _settings = settings;
@@ -82,6 +94,7 @@ public class AdminController : ControllerBase
         _lastFmOpts = lastFmOpts;
         _notificationOpts = notificationOpts;
         _metadataOpts = metadataOpts;
+        _serverOpts = serverOpts;
         _notifications = notifications;
         _config = config;
         _slskd = slskd;
@@ -95,7 +108,92 @@ public class AdminController : ControllerBase
         _httpFactory = httpFactory;
         _lifetime = lifetime;
         _logger = logger;
+        _radioState = radioState;
+        _radioRefresh = radioRefresh;
     }
+
+    [HttpGet("lastfm/radio")]
+    public IActionResult GetLastFmRadio([FromQuery] string? user = null)
+    {
+        if (_radioState is null) return Ok(new { users = Array.Empty<object>(), stations = Array.Empty<object>() });
+        var summaries = _radioState.GetSummaries();
+        var selected = string.IsNullOrWhiteSpace(user) ? summaries.FirstOrDefault()?.Username : user.Trim();
+        var state = selected is null ? null : _radioState.GetUser(selected);
+        var settings = _lastFmOpts.CurrentValue;
+        return Ok(new
+        {
+            enabled = settings.EnableRadio,
+            hasApiKey = !string.IsNullOrWhiteSpace(settings.ApiKey),
+            personalizedEnabled = settings.EnablePersonalizedStations,
+            discoveryEnabled = settings.EnableDiscoveryStations,
+            playlistsEnabled = settings.ExposeRadioAsPlaylists,
+            streamsEnabled = settings.ExposeRadioAsStreams,
+            streamBitrateKbps = settings.EffectiveRadioStreamBitrateKbps,
+            icyMetadataEnabled = settings.EnableIcyMetadata,
+            minimumPlays = settings.EffectiveMinimumPlays,
+            selectedUser = selected,
+            users = summaries,
+            learning = state is null ? null : new
+            {
+                plays = state.Plays.Count(play => play.LearnedSignal),
+                needed = Math.Max(0, settings.EffectiveMinimumPlays - state.Plays.Count(play => play.LearnedSignal)),
+                source = state.Plays.Any(play => play.LearnedSignal) ? "completed scrobbles and accessible stars" :
+                    state.Plays.Count > 0 ? "accessible random Starter seeds" : "waiting for completed scrobbles",
+                state.Refreshing, state.LastRefreshAttemptUtc, state.LastRefreshSuccessUtc,
+                state.LastRefreshError
+            },
+            stations = state?.Stations.Select(station => new
+            {
+                station.Id, station.Name, kind = station.Kind.ToString(), station.Personalized,
+                trackCount = station.Tracks.Count, station.Seeds, station.CreatedUtc,
+                station.ChangedUtc, station.ValidUntilUtc,
+                preview = station.Tracks.Take(5).Select(track => new { track.Artist, track.Title })
+            }) ?? []
+        });
+    }
+
+    /// <summary>Checks the ListenBrainz token that applies to a listener (or the
+    /// default) against ListenBrainz, so a mistyped token shows up before a play is lost.</summary>
+    [HttpGet("listenbrainz/validate")]
+    public async Task<IActionResult> ValidateListenBrainz([FromQuery] string? user = null,
+        [FromQuery] string? token = null)
+    {
+        if (_listenBrainz is null || _listenBrainzOpts is null)
+            return Ok(new { configured = false, valid = false, detail = "ListenBrainz is not available." });
+        var candidate = string.IsNullOrWhiteSpace(token)
+            ? _listenBrainzOpts.CurrentValue.TokenFor(user ?? "") ?? ""
+            : token;
+        if (candidate.Length == 0)
+            return Ok(new { configured = false, valid = false, detail = "No token configured." });
+        var (valid, userName, detail) = await _listenBrainz.ValidateTokenAsync(candidate, HttpContext.RequestAborted);
+        return Ok(new { configured = true, valid, userName, detail });
+    }
+
+    [HttpPost("lastfm/radio/refresh")]
+    public IActionResult RefreshLastFmRadio([FromBody] RadioUserRequest request)
+    {
+        if (_radioRefresh is null || string.IsNullOrWhiteSpace(request.User))
+            return BadRequest(new { error = "A known Navidrome user is required" });
+        var queued = _radioRefresh.Enqueue(request.User, request.StationId);
+        return Accepted(new { ok = true, queued });
+    }
+
+    [HttpDelete("lastfm/radio/history")]
+    public IActionResult ResetLastFmRadio([FromQuery] string user)
+    {
+        if (_radioState is null || string.IsNullOrWhiteSpace(user))
+            return BadRequest(new { error = "A known Navidrome user is required" });
+        var before = _radioState.GetUser(user);
+        var removed = _radioState.Reset(user);
+        return Ok(new
+        {
+            ok = removed, user, removedPlays = removed ? before.Plays.Count : 0,
+            removedStations = removed ? before.Stations.Count : 0,
+            message = "Radio history and generated snapshots were removed. Downloaded music was untouched."
+        });
+    }
+
+    public sealed class RadioUserRequest { public string User { get; set; } = string.Empty; public string? StationId { get; set; } }
 
     /// <summary>
     /// Scans the local network for Subsonic/Navidrome servers so the setup UI can
@@ -280,9 +378,7 @@ public class AdminController : ControllerBase
     [HttpGet("/admin")]
     public IActionResult AdminRoot()
     {
-        var path = Path.Combine(AppContext.BaseDirectory, "wwwroot", "admin", "index.html");
-        if (!System.IO.File.Exists(path)) return NotFound(new { error = "admin UI not found in publish output" });
-        return PhysicalFile(path, "text/html");
+        return Redirect("/admin/index.html");
     }
 
     /// <summary>
@@ -339,6 +435,10 @@ public class AdminController : ControllerBase
             {
                 ["DownloadPath"] = _config["Library:DownloadPath"] ?? "/music",
             },
+            ["Server"] = new Dictionary<string, object>
+            {
+                ["PublicUrl"] = _serverOpts.CurrentValue.PublicUrl ?? "",
+            },
             ["Soulseek"] = new Dictionary<string, object>
             {
                 ["BaseUrl"] = soulseek.BaseUrl ?? "",
@@ -369,6 +469,20 @@ public class AdminController : ControllerBase
                 ["EnableRadio"] = lastfm.EnableRadio,
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
                 ["RadioCacheDurationHours"] = lastfm.RadioCacheDurationHours,
+                ["EnablePersonalizedStations"] = lastfm.EnablePersonalizedStations,
+                ["EnableDiscoveryStations"] = lastfm.EnableDiscoveryStations,
+                ["ExposeRadioAsPlaylists"] = lastfm.ExposeRadioAsPlaylists,
+                ["ExposeRadioAsStreams"] = lastfm.ExposeRadioAsStreams,
+                ["RadioStreamBitrateKbps"] = lastfm.RadioStreamBitrateKbps,
+                ["EnableIcyMetadata"] = lastfm.EnableIcyMetadata,
+                ["StarterPublishTimeoutSeconds"] = lastfm.StarterPublishTimeoutSeconds,
+                ["RadioLoudnessTargetLufs"] = lastfm.RadioLoudnessTargetLufs,
+                ["HistoryRetentionDays"] = lastfm.HistoryRetentionDays,
+                ["DiscoveryPercent"] = lastfm.DiscoveryPercent,
+                ["RefreshIntervalHours"] = lastfm.RefreshIntervalHours,
+                ["MinimumPlays"] = lastfm.MinimumPlays,
+                ["DiscoveryStations"] = (_settings.Load()["LastFm"] as JsonObject)?["DiscoveryStations"]?.DeepClone()
+                    ?? JsonSerializer.SerializeToNode(lastfm.DiscoveryStations)!,
             },
             ["Metadata"] = new Dictionary<string, object>
             {
@@ -384,6 +498,13 @@ public class AdminController : ControllerBase
                 ["NotifyLosslessFallback"] = notif.NotifyLosslessFallback,
                 ["NotifyDownloadFailed"] = notif.NotifyDownloadFailed,
                 ["NotifyAlbumCompleted"] = notif.NotifyAlbumCompleted,
+            },
+            ["ListenBrainz"] = new Dictionary<string, object>
+            {
+                ["Token"] = _listenBrainzOpts?.CurrentValue.Token ?? "",
+                ["SubmitExternalPlays"] = _listenBrainzOpts?.CurrentValue.SubmitExternalPlays ?? true,
+                ["UserTokens"] = _listenBrainzOpts?.CurrentValue.UserTokens
+                    ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
             },
             ["_meta"] = new Dictionary<string, object>
             {
@@ -427,6 +548,13 @@ public class AdminController : ControllerBase
         // up persisted to disk.
         patch.Remove("_meta");
 
+        if (patch["LastFm"] is JsonObject lastFmPatch
+            && lastFmPatch["DiscoveryStations"] is JsonArray discovery)
+        {
+            var validationError = ValidateDiscoveryStations(discovery);
+            if (validationError is not null) return BadRequest(new { error = validationError });
+        }
+
         try
         {
             var merged = _settings.Merge(patch);
@@ -439,6 +567,26 @@ public class AdminController : ControllerBase
             _logger.LogError(ex, "Failed to persist settings to {Path}", _settings.FilePath);
             return StatusCode(500, new { error = ex.Message });
         }
+    }
+
+    private static string? ValidateDiscoveryStations(JsonArray stations)
+    {
+        if (stations.Count > 12) return "LastFm.DiscoveryStations supports at most 12 entries";
+        var ids = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var node in stations)
+        {
+            if (node is not JsonObject station) return "Every discovery station must be an object";
+            var id = station["Id"]?.GetValue<string>()?.Trim() ?? "";
+            var name = station["Name"]?.GetValue<string>()?.Trim() ?? "";
+            var tags = station["Tags"] as JsonArray;
+            if (id.Length == 0 || !ids.Add(id)) return "Discovery station IDs must be present and unique";
+            if (name.Length is 0 or > 100 || !names.Add(name)) return "Discovery station names must be present, unique, and at most 100 characters";
+            if (tags is null || tags.Count is 0 or > 5
+                || tags.Any(tag => string.IsNullOrWhiteSpace(tag?.GetValue<string>())))
+                return $"{name} must contain between one and five non-empty tags";
+        }
+        return null;
     }
 
     /// <summary>
@@ -461,6 +609,7 @@ public class AdminController : ControllerBase
         var lidarr = _lidarrOpts.CurrentValue;
         var lastfm = _lastFmOpts.CurrentValue;
         var notif = _notificationOpts.CurrentValue;
+        var server = _serverOpts.CurrentValue;
 
         var effective = new JsonObject
         {
@@ -495,6 +644,13 @@ public class AdminController : ControllerBase
             {
                 ["DownloadPath"] = _config["Library:DownloadPath"] ?? "/music",
             },
+            // Must be listed here even though nothing reads it back: PUT writes
+            // this document wholesale, so a section missing from the GET is a
+            // section the next plain Save silently deletes.
+            ["Server"] = new JsonObject
+            {
+                ["PublicUrl"] = server.PublicUrl ?? "",
+            },
             ["Soulseek"] = new JsonObject
             {
                 ["BaseUrl"] = soulseek.BaseUrl ?? "",
@@ -525,6 +681,19 @@ public class AdminController : ControllerBase
                 ["EnableRadio"] = lastfm.EnableRadio,
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
                 ["RadioCacheDurationHours"] = lastfm.RadioCacheDurationHours,
+                ["EnablePersonalizedStations"] = lastfm.EnablePersonalizedStations,
+                ["EnableDiscoveryStations"] = lastfm.EnableDiscoveryStations,
+                ["ExposeRadioAsPlaylists"] = lastfm.ExposeRadioAsPlaylists,
+                ["ExposeRadioAsStreams"] = lastfm.ExposeRadioAsStreams,
+                ["RadioStreamBitrateKbps"] = lastfm.RadioStreamBitrateKbps,
+                ["EnableIcyMetadata"] = lastfm.EnableIcyMetadata,
+                ["StarterPublishTimeoutSeconds"] = lastfm.StarterPublishTimeoutSeconds,
+                ["RadioLoudnessTargetLufs"] = lastfm.RadioLoudnessTargetLufs,
+                ["HistoryRetentionDays"] = lastfm.HistoryRetentionDays,
+                ["DiscoveryPercent"] = lastfm.DiscoveryPercent,
+                ["RefreshIntervalHours"] = lastfm.RefreshIntervalHours,
+                ["MinimumPlays"] = lastfm.MinimumPlays,
+                ["DiscoveryStations"] = JsonSerializer.SerializeToNode(lastfm.DiscoveryStations),
             },
             ["Metadata"] = new JsonObject
             {
@@ -540,6 +709,16 @@ public class AdminController : ControllerBase
                 ["NotifyLosslessFallback"] = notif.NotifyLosslessFallback,
                 ["NotifyDownloadFailed"] = notif.NotifyDownloadFailed,
                 ["NotifyAlbumCompleted"] = notif.NotifyAlbumCompleted,
+            },
+            // Present even when unset: a section missing from this document is a
+            // section the next Raw Config save silently deletes.
+            ["ListenBrainz"] = new JsonObject
+            {
+                ["Token"] = _listenBrainzOpts?.CurrentValue.Token ?? "",
+                ["SubmitExternalPlays"] = _listenBrainzOpts?.CurrentValue.SubmitExternalPlays ?? true,
+                ["UserTokens"] = new JsonObject(
+                    (_listenBrainzOpts?.CurrentValue.UserTokens ?? new Dictionary<string, string>())
+                    .Select(pair => new KeyValuePair<string, JsonNode?>(pair.Key, pair.Value))),
             },
         };
         var json = effective.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
@@ -616,6 +795,7 @@ public class AdminController : ControllerBase
             "Subsonic:CacheDurationHours", "Subsonic:EnableExternalPlaylists",
             "Subsonic:PlaylistsDirectory",
             "Library:DownloadPath",
+            "Server:PublicUrl",
             "Soulseek:BaseUrl", "Soulseek:Username", "Soulseek:Password",
             "Soulseek:SearchWaitSeconds", "Soulseek:MinFileSizeBytes",
             "Soulseek:PreferredExtension", "Soulseek:DownloadTimeoutSeconds",
@@ -624,13 +804,19 @@ public class AdminController : ControllerBase
             "Lidarr:CompletionMode", "Lidarr:ImportTimeoutSeconds",
             "YouTube:ShimUrl",
             "LastFm:ApiKey", "LastFm:EnableRadio", "LastFm:RadioTrackCount",
-            "LastFm:RadioCacheDurationHours",
+            "LastFm:RadioCacheDurationHours", "LastFm:StarterPublishTimeoutSeconds",
+            "LastFm:RadioLoudnessTargetLufs",
+            "LastFm:EnablePersonalizedStations", "LastFm:EnableDiscoveryStations",
+            "LastFm:HistoryRetentionDays", "LastFm:DiscoveryPercent",
+            "LastFm:RefreshIntervalHours",
+            "LastFm:MinimumPlays", "LastFm:DiscoveryStations",
             "Metadata:Language",
             "Notifications:NtfyUrl", "Notifications:NtfyToken",
             "Notifications:DiscordWebhookUrl",
             "Notifications:NotifyDownloadStarted", "Notifications:NotifyDownloadCompleted",
             "Notifications:NotifyLosslessFallback", "Notifications:NotifyDownloadFailed",
             "Notifications:NotifyAlbumCompleted",
+            "ListenBrainz:Token", "ListenBrainz:SubmitExternalPlays",
         };
         var rows = new List<object>();
         foreach (var k in keys)
