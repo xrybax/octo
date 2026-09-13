@@ -59,11 +59,20 @@ services:
       Lidarr__CompletionMode: ${LIDARR_COMPLETION_MODE:-Accepted}
       Lidarr__ImportTimeoutSeconds: ${LIDARR_IMPORT_TIMEOUT_SECONDS:-1800}
 
-      # ----- Last.fm radio -----
+      # ----- Last.fm radio + temporary-track scrobbling -----
       LastFm__ApiKey: ${LASTFM_API_KEY:-}
+      LastFm__ApiSecret: ${LASTFM_API_SECRET:-}
+      LastFm__SessionKey: ${LASTFM_SESSION_KEY:-}
+      LastFm__Username: ${LASTFM_USERNAME:-}
+      LastFm__EnableScrobbling: ${LASTFM_ENABLE_SCROBBLING:-false}
       LastFm__EnableRadio: ${LASTFM_ENABLE_RADIO:-true}
       LastFm__RadioTrackCount: ${LASTFM_RADIO_TRACK_COUNT:-50}
       LastFm__RadioCacheDurationHours: ${LASTFM_RADIO_CACHE_HOURS:-24}
+
+      # ----- Temporary-track listening history -----
+      ListenBrainz__EnableScrobbling: ${LISTENBRAINZ_ENABLE_SCROBBLING:-false}
+      ListenBrainz__UserToken: ${LISTENBRAINZ_USER_TOKEN:-}
+      ListenBrainz__BaseUrl: ${LISTENBRAINZ_BASE_URL:-https://api.listenbrainz.org}
 
       # ----- Metadata language (genre tags etc. from Deezer / Last.fm) -----
       Metadata__Language: ${METADATA_LANGUAGE:-en}

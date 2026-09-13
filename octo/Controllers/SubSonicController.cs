@@ -15,6 +15,7 @@ using Octo.Services.Common;
 using Octo.Services.Local;
 using Octo.Services.Subsonic;
 using Octo.Services.LastFm;
+using Octo.Services.Listening;
 using Octo.Services.CoverArt;
 using Octo.Services.Soulseek;
 
@@ -50,6 +51,7 @@ public class SubsonicController : ControllerBase
     private readonly SearchRequestCoordinator _searchRequests;
     private readonly RadioQueueStore _radioQueueStore;
     private readonly NavidromeIdentityService _navIdentity;
+    private readonly ExternalPlaybackScrobbler? _externalPlaybackScrobbler;
     private readonly ILogger<SubsonicController> _logger;
 
     public SubsonicController(
@@ -73,7 +75,8 @@ public class SubsonicController : ControllerBase
         PlaylistSyncService? playlistSyncService = null,
         LastFmService? lastFmService = null,
         CoverArtService? coverArtService = null,
-        CoverArtAggregator? coverArtAggregator = null)
+        CoverArtAggregator? coverArtAggregator = null,
+        ExternalPlaybackScrobbler? externalPlaybackScrobbler = null)
     {
         subsonicSettingsOptions = subsonicSettings;
         _metadataService = metadataService;
@@ -95,6 +98,7 @@ public class SubsonicController : ControllerBase
         _lastFmSettings = lastFmSettings.Value;
         _coverArtService = coverArtService;
         _coverArtAggregator = coverArtAggregator;
+        _externalPlaybackScrobbler = externalPlaybackScrobbler;
         _logger = logger;
         // No hard throw on a missing/blank Subsonic URL: that made every request
         // fail opaquely. Misconfiguration is now reported per-request with an
@@ -1996,8 +2000,9 @@ public class SubsonicController : ControllerBase
     /// we registered, fire-and-forget yt-dlp resolution for the next 8
     /// unresolved external songs so a fast-skip user always has 8 ready ahead.
     ///
-    /// We always relay to Navidrome too, because real scrobbling (last-played
-    /// stats, the Now Playing panel) is the upstream's job.
+    /// Local ids still relay to Navidrome. Temporary ids cannot be relayed — the
+    /// upstream has never seen them — so Octo sends their captured metadata to
+    /// the configured Last.fm and ListenBrainz accounts instead.
     /// </summary>
     [HttpGet, HttpPost]
     [Route("rest/scrobble")]
@@ -2007,6 +2012,7 @@ public class SubsonicController : ControllerBase
         var parameters = await ExtractAllParameters();
         var id = parameters.GetValueOrDefault("id", "");
         var format = parameters.GetValueOrDefault("f", "xml");
+        var (isExternal, _, _) = _localLibraryService.ParseSongId(id);
 
         if (!string.IsNullOrEmpty(id))
         {
@@ -2018,7 +2024,14 @@ public class SubsonicController : ControllerBase
             }
         }
 
-        // Always pass through so Navidrome's last-played/Now Playing stays accurate.
+        if (isExternal)
+        {
+            _externalPlaybackScrobbler?.ReportScrobble(parameters);
+            return _responseBuilder.CreateResponse(format, "scrobble", new { });
+        }
+
+        // Local tracks remain Navidrome's responsibility, including its play counts
+        // and any scrobbling plugin already configured there.
         try
         {
             var result = await _proxyService.RelayAsync("rest/scrobble", parameters);
@@ -2106,6 +2119,9 @@ public class SubsonicController : ControllerBase
         var format = parameters.GetValueOrDefault("f", "xml");
         var mediaId = parameters.GetValueOrDefault("mediaId", parameters.GetValueOrDefault("id", ""));
         var (isExternal, _, _) = _localLibraryService.ParseSongId(mediaId);
+
+        if (isExternal)
+            _externalPlaybackScrobbler?.ReportPlayback(parameters);
 
         if (!isExternal && !string.IsNullOrEmpty(mediaId))
         {

@@ -8,6 +8,7 @@ using Octo.Services.Subsonic;
 using Octo.Services.Common;
 using Octo.Services.LastFm;
 using Octo.Services.Lidarr;
+using Octo.Services.Listening;
 using Octo.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -45,6 +46,8 @@ builder.Services.Configure<LidarrSettings>(
     builder.Configuration.GetSection("Lidarr"));
 builder.Services.Configure<LastFmSettings>(
     builder.Configuration.GetSection("LastFm"));
+builder.Services.Configure<ListenBrainzSettings>(
+    builder.Configuration.GetSection("ListenBrainz"));
 builder.Services.Configure<NotificationSettings>(
     builder.Configuration.GetSection("Notifications"));
 builder.Services.Configure<MetadataSettings>(
@@ -125,6 +128,30 @@ builder.Services.Configure<HostOptions>(o => o.ShutdownTimeout = TimeSpan.FromSe
 
 builder.Services.AddHttpClient<LastFmService>();
 builder.Services.AddSingleton<LastFmService>();
+
+// Temporary songs never exist in Navidrome, so its scrobblers cannot resolve
+// them. Capture their metadata while the external-id routing is alive and send
+// it independently. Completed listens use a durable outbox under /app/config;
+// Now Playing is deliberately best-effort.
+builder.Services.AddHttpClient(LastFmScrobblingSink.HttpClientName,
+    client => client.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddHttpClient(ListenBrainzListeningSink.HttpClientName,
+    client => client.Timeout = TimeSpan.FromSeconds(10));
+builder.Services.AddSingleton<LastFmScrobblingSink>();
+builder.Services.AddSingleton<ListenBrainzListeningSink>();
+builder.Services.AddSingleton<IListeningSink>(sp =>
+    sp.GetRequiredService<LastFmScrobblingSink>());
+builder.Services.AddSingleton<IListeningSink>(sp =>
+    sp.GetRequiredService<ListenBrainzListeningSink>());
+builder.Services.AddSingleton(sp => new PersistentScrobbleOutbox(
+    System.IO.Path.Combine(System.IO.Path.GetDirectoryName(SettingsFilePath)!, "scrobble-outbox.json"),
+    sp.GetRequiredService<ILogger<PersistentScrobbleOutbox>>()));
+builder.Services.AddSingleton<ListeningSubmissionWorker>();
+builder.Services.AddSingleton<IListeningSubmissionQueue>(sp =>
+    sp.GetRequiredService<ListeningSubmissionWorker>());
+builder.Services.AddSingleton<IHostedService>(sp =>
+    sp.GetRequiredService<ListeningSubmissionWorker>());
+builder.Services.AddSingleton<ExternalPlaybackScrobbler>();
 
 // Push notifications (ntfy / Discord webhook). The orchestrator takes
 // IEnumerable<INotificationSink>, so adding a transport is one registration line.

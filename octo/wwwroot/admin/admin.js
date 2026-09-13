@@ -1139,6 +1139,71 @@ window.addEventListener('resize', () => syncSegments(false));
 })();
 
 // ────────────────────────────────────────────────────────────────
+// Last.fm desktop authorization. Last.fm does not redirect a desktop app
+// back with a session key, so the user approves in a new tab and finishes
+// the short-lived token exchange here.
+// ────────────────────────────────────────────────────────────────
+const lastFmAuthStart = document.getElementById('lastfm-auth-start');
+const lastFmAuthComplete = document.getElementById('lastfm-auth-complete');
+const lastFmAuthStatus = document.getElementById('lastfm-auth-status');
+let pendingLastFmToken = null;
+try { pendingLastFmToken = sessionStorage.getItem('octo-lastfm-auth-token'); } catch { }
+if (lastFmAuthComplete) lastFmAuthComplete.hidden = !pendingLastFmToken;
+if (lastFmAuthStatus && pendingLastFmToken) {
+  lastFmAuthStatus.textContent = 'Approve access in Last.fm, then finish here.';
+}
+
+lastFmAuthStart?.addEventListener('click', async () => {
+  const popup = window.open('about:blank', '_blank');
+  lastFmAuthStart.disabled = true;
+  if (lastFmAuthStatus) lastFmAuthStatus.textContent = 'Starting…';
+  try {
+    const response = await fetch('/api/admin/lastfm/auth/start', { method: 'POST' });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    pendingLastFmToken = result.token;
+    try { sessionStorage.setItem('octo-lastfm-auth-token', pendingLastFmToken); } catch { }
+    if (lastFmAuthComplete) lastFmAuthComplete.hidden = false;
+    if (lastFmAuthStatus) lastFmAuthStatus.textContent = 'Approve access in Last.fm, then click Finish.';
+    if (popup) popup.location = result.authorizationUrl;
+    else window.open(result.authorizationUrl, '_blank', 'noopener');
+  } catch (error) {
+    popup?.close();
+    if (lastFmAuthStatus) lastFmAuthStatus.textContent = '';
+    toast(`Last.fm connection failed: ${error.message}`, 'error');
+  } finally {
+    lastFmAuthStart.disabled = false;
+  }
+});
+
+lastFmAuthComplete?.addEventListener('click', async () => {
+  if (!pendingLastFmToken) return;
+  lastFmAuthComplete.disabled = true;
+  if (lastFmAuthStatus) lastFmAuthStatus.textContent = 'Finishing…';
+  try {
+    const response = await fetch('/api/admin/lastfm/auth/complete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token: pendingLastFmToken }),
+    });
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.error || `HTTP ${response.status}`);
+    pendingLastFmToken = null;
+    try { sessionStorage.removeItem('octo-lastfm-auth-token'); } catch { }
+    lastFmAuthComplete.hidden = true;
+    if (lastFmAuthStatus) lastFmAuthStatus.textContent = `Connected · ${result.username || 'Last.fm'}`;
+    await new Promise(resolve => setTimeout(resolve, 600));
+    await loadSettings();
+    toast('Last.fm scrobbling connected.', 'ok');
+  } catch (error) {
+    if (lastFmAuthStatus) lastFmAuthStatus.textContent = 'Approval not completed.';
+    toast(`Last.fm connection failed: ${error.message}`, 'error');
+  } finally {
+    lastFmAuthComplete.disabled = false;
+  }
+});
+
+// ────────────────────────────────────────────────────────────────
 // Boot
 // ────────────────────────────────────────────────────────────────
 loadSettings();

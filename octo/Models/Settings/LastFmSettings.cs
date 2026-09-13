@@ -6,6 +6,18 @@ public class LastFmSettings
     /// Last.fm API key for fetching similar tracks
     /// </summary>
     public string ApiKey { get; set; } = string.Empty;
+
+    /// <summary>Shared secret used to sign authenticated scrobbling calls.</summary>
+    public string ApiSecret { get; set; } = string.Empty;
+
+    /// <summary>Long-lived key granted after the user authorizes Octo.</summary>
+    public string SessionKey { get; set; } = string.Empty;
+
+    /// <summary>Informational account name returned with the session key.</summary>
+    public string Username { get; set; } = string.Empty;
+
+    /// <summary>Send Octo-only temporary-track listens to Last.fm.</summary>
+    public bool EnableScrobbling { get; set; }
     
     /// <summary>
     /// Enable/disable the radio feature
