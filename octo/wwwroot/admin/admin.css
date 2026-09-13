@@ -902,6 +902,8 @@ section[data-pane].active { display: block; }
 .set-inline { display: flex; gap: 8px; }
 .set-inline .set-input { flex: 1 1 auto; min-width: 0; }
 .set-grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.form-actions-static { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; }
+.form-actions-static .saved-status { margin-left: 4px; font-size: 12px; color: var(--fg-mute); }
 
 /* ── Sliding toggle switch ── */
 .switch { position: relative; display: inline-block; width: 42px; height: 24px; flex-shrink: 0; cursor: pointer; }

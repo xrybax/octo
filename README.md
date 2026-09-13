@@ -63,7 +63,8 @@ So setup is two steps: **tell Octo where Navidrome is**, and **point your app at
 
 **Optional** — Octo runs fine without these:
 
-- A free [Last.fm API key](https://www.last.fm/api/account/create) — enables radio / discovery.
+- A free [Last.fm API key](https://www.last.fm/api/account/create) — enables radio / discovery; its shared secret also lets Octo connect your account for temporary-track scrobbling.
+- A [ListenBrainz user token](https://listenbrainz.org/settings/) — stores qualified listens for temporary tracks.
 - A free [Soulseek account](https://www.slsknet.org/news/node/1) — enables lossless FLAC downloads when you star a song.
 - An existing [Lidarr](https://github.com/Lidarr/Lidarr) server: an alternative heart source once it has working indexers and a download client.
 
@@ -172,7 +173,7 @@ Navidrome's radio plays songs from your existing library. Octo's radio reaches *
 
 ### Is my data going anywhere?
 
-No. Octo runs entirely on your hardware. It calls Last.fm (for similar-tracks data), YouTube via yt-dlp (for audio previews), and Soulseek peers (for downloads). Those are outbound queries — nothing about your library or listening history is shipped anywhere.
+By default, listening-history submission is off. Octo still calls Last.fm for similar-track data, YouTube via yt-dlp for previews, and Soulseek peers for downloads. If you explicitly enable Last.fm or ListenBrainz scrobbling in the admin UI, Octo sends the artist, title and available release metadata for qualified temporary-track listens to those services. It never submits local-library tracks itself; those remain Navidrome's responsibility.
 
 ### Do downloaded songs get tagged correctly?
 
@@ -269,6 +270,14 @@ Tracks already in your library play locally through Navidrome. Missing external 
 
 Set `WAIT_FOR_LOSSLESS_ON_PLAY=true` if you would rather the first play wait for the lossless file. It is off by default because a Soulseek fetch routinely takes minutes and most clients time out long before that, which looks like the play failing. The setting also changes what searches advertise for external tracks, so it needs a restart, and clients that cached earlier results should re-search after you change it.
 
+### Temporary-track scrobbling
+
+Open the **Last.fm** admin tab, save your API key and shared secret, then use **Connect Last.fm** to approve Octo without giving it your password. For ListenBrainz, copy the user token from its settings page into Octo's **ListenBrainz** tab. Both destinations can be enabled independently and hot-reload without a restart.
+
+Octo intercepts playback events only for its temporary external ids. It sends a best-effort Now Playing notification at start, then records a listen after more than 30 seconds of total track length and either half the track or four minutes of playback, whichever comes first. Classic Subsonic clients that send a completed `scrobble` remain supported; OpenSubsonic clients such as Feishin are tracked through `reportPlayback`. Signals from both endpoints are combined into one session so the same play is not submitted twice.
+
+Completed listens enter `/app/config/scrobble-outbox.json` before delivery. Temporary outages and container restarts therefore do not lose them; Last.fm and ListenBrainz are retried independently. Local songs continue through Navidrome, avoiding duplicates with its own scrobbling plugins.
+
 ### Folder layouts
 
 - `Flat` *(default)* — `Artist - Title.flac`.
@@ -286,7 +295,8 @@ Octo hijacks these endpoints; everything else proxies to Navidrome unchanged:
 | `getCoverArt` | Deezer → iTunes → Last.fm aggregator with Octo watermark |
 | `getAlbum` | external album tracklists, and fills in tracks you're missing from an album you own |
 | `star` | try enabled heart sources in priority order and stop after the first successful track/album acquisition |
-| `scrobble` | sliding-window prewarm of next 8 in queue |
+| `scrobble` | prewarm the queue; submit temporary-track metadata to Last.fm / ListenBrainz |
+| `reportPlayback` | track temporary-song progress and apply the half-track / four-minute threshold |
 | `getTranscodeDecision` | OpenSubsonic — return direct-play for Octo IDs |
 
 ### Soulseek download details
@@ -355,6 +365,7 @@ Project layout:
 | `octo/Services/Lidarr/` | Lidarr API, album submission, import reconciliation |
 | `octo/Services/YouTube/` | shim HTTP client |
 | `octo/Services/CoverArt/` | Deezer / iTunes / Last.fm aggregator |
+| `octo/Services/Listening/` | playback-session tracking, durable outbox, Last.fm and ListenBrainz clients |
 | `octo/Services/Subsonic/` | request parsing, response building |
 | `octo/Services/Admin/` | settings file writer (atomic, deep-merge) |
 | `octo/wwwroot/admin/` | the admin UI (vanilla JS, hand-rolled CSS, no build step) |
@@ -374,6 +385,7 @@ Project layout:
 - [**slskd**](https://github.com/slskd/slskd) — Soulseek with a REST API.
 - [**Lidarr**](https://github.com/Lidarr/Lidarr) — optional album acquisition and import manager.
 - [**yt-dlp**](https://github.com/yt-dlp/yt-dlp) — makes YouTube preview feasible.
-- [**Last.fm**](https://www.last.fm/api) — similar-tracks API.
+- [**Last.fm**](https://www.last.fm/api) — similar tracks and optional scrobbling.
+- [**ListenBrainz**](https://listenbrainz.org/) — optional open listening history.
 - [**V1ck3s/octo-fiesta**](https://github.com/V1ck3s/octo-fiesta) — the upstream root of this lineage. The Qobuz/Deezer/Yandex Subsonic-proxy concept that Octo eventually rebuilt around YouTube + Soulseek started here.
 - [**bransoned/octo-fiestarr**](https://github.com/bransoned/octo-fiestarr) — the intermediate fork of octo-fiesta whose codebase Octo's earliest commits descended from.

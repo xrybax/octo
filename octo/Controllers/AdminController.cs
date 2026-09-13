@@ -6,6 +6,7 @@ using Octo.Models.Settings;
 using Octo.Services.Admin;
 using Octo.Services.LastFm;
 using Octo.Services.Lidarr;
+using Octo.Services.Listening;
 using Octo.Services.Soulseek;
 using Octo.Services.Subsonic;
 
@@ -31,6 +32,7 @@ public class AdminController : ControllerBase
     private readonly IOptionsMonitor<SoulseekSettings> _soulseekOpts;
     private readonly IOptionsMonitor<LidarrSettings> _lidarrOpts;
     private readonly IOptionsMonitor<LastFmSettings> _lastFmOpts;
+    private readonly IOptionsMonitor<ListenBrainzSettings> _listenBrainzOpts;
     private readonly IOptionsMonitor<NotificationSettings> _notificationOpts;
     private readonly IOptionsMonitor<MetadataSettings> _metadataOpts;
     private readonly Octo.Services.Notifications.NotificationService _notifications;
@@ -46,6 +48,7 @@ public class AdminController : ControllerBase
     private readonly Octo.Services.Metadata.DeezerMetadataService _deezer;
     private readonly Octo.Services.CoverArt.CoverArtAggregator _coverArt;
     private readonly IHttpClientFactory _httpFactory;
+    private readonly LastFmScrobblingSink _lastFmScrobbler;
     private readonly IHostApplicationLifetime _lifetime;
     private readonly ILogger<AdminController> _logger;
 
@@ -55,6 +58,7 @@ public class AdminController : ControllerBase
         IOptionsMonitor<SoulseekSettings> soulseekOpts,
         IOptionsMonitor<LidarrSettings> lidarrOpts,
         IOptionsMonitor<LastFmSettings> lastFmOpts,
+        IOptionsMonitor<ListenBrainzSettings> listenBrainzOpts,
         IOptionsMonitor<NotificationSettings> notificationOpts,
         IOptionsMonitor<MetadataSettings> metadataOpts,
         Octo.Services.Notifications.NotificationService notifications,
@@ -70,6 +74,7 @@ public class AdminController : ControllerBase
         Octo.Services.Metadata.DeezerMetadataService deezer,
         Octo.Services.CoverArt.CoverArtAggregator coverArt,
         IHttpClientFactory httpFactory,
+        LastFmScrobblingSink lastFmScrobbler,
         IHostApplicationLifetime lifetime,
         ILogger<AdminController> logger)
     {
@@ -80,6 +85,7 @@ public class AdminController : ControllerBase
         _soulseekOpts = soulseekOpts;
         _lidarrOpts = lidarrOpts;
         _lastFmOpts = lastFmOpts;
+        _listenBrainzOpts = listenBrainzOpts;
         _notificationOpts = notificationOpts;
         _metadataOpts = metadataOpts;
         _notifications = notifications;
@@ -93,6 +99,7 @@ public class AdminController : ControllerBase
         _browseSessions = browseSessions;
         _history = history;
         _httpFactory = httpFactory;
+        _lastFmScrobbler = lastFmScrobbler;
         _lifetime = lifetime;
         _logger = logger;
     }
@@ -299,6 +306,7 @@ public class AdminController : ControllerBase
         var soulseek = _soulseekOpts.CurrentValue;
         var lidarr = _lidarrOpts.CurrentValue;
         var lastfm = _lastFmOpts.CurrentValue;
+        var listenBrainz = _listenBrainzOpts.CurrentValue;
         var notif = _notificationOpts.CurrentValue;
 
         // Use Dictionary<string, object> so System.Text.Json doesn't camelCase
@@ -366,9 +374,19 @@ public class AdminController : ControllerBase
             ["LastFm"] = new Dictionary<string, object>
             {
                 ["ApiKey"] = lastfm.ApiKey ?? "",
+                ["ApiSecret"] = lastfm.ApiSecret ?? "",
+                ["SessionKey"] = lastfm.SessionKey ?? "",
+                ["Username"] = lastfm.Username ?? "",
+                ["EnableScrobbling"] = lastfm.EnableScrobbling,
                 ["EnableRadio"] = lastfm.EnableRadio,
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
                 ["RadioCacheDurationHours"] = lastfm.RadioCacheDurationHours,
+            },
+            ["ListenBrainz"] = new Dictionary<string, object>
+            {
+                ["EnableScrobbling"] = listenBrainz.EnableScrobbling,
+                ["UserToken"] = listenBrainz.UserToken ?? "",
+                ["BaseUrl"] = listenBrainz.BaseUrl ?? "https://api.listenbrainz.org",
             },
             ["Metadata"] = new Dictionary<string, object>
             {
@@ -442,6 +460,59 @@ public class AdminController : ControllerBase
     }
 
     /// <summary>
+    /// Starts Last.fm's desktop authorization flow. The browser receives the
+    /// short-lived token so it can finish the exchange after the user grants access.
+    /// </summary>
+    [HttpPost("lastfm/auth/start")]
+    public async Task<IActionResult> StartLastFmAuthorization(CancellationToken ct)
+    {
+        try
+        {
+            var token = await _lastFmScrobbler.CreateAuthorizationTokenAsync(ct);
+            return Ok(new
+            {
+                token,
+                authorizationUrl = _lastFmScrobbler.CreateAuthorizationUrl(token),
+            });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Last.fm authorization could not start: {Message}", ex.Message);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    public sealed record LastFmAuthorizationRequest(string? Token);
+
+    /// <summary>Exchanges an approved Last.fm token and persists the session key.</summary>
+    [HttpPost("lastfm/auth/complete")]
+    public async Task<IActionResult> CompleteLastFmAuthorization(
+        [FromBody] LastFmAuthorizationRequest request,
+        CancellationToken ct)
+    {
+        try
+        {
+            var session = await _lastFmScrobbler.ExchangeAuthorizationTokenAsync(
+                request.Token ?? string.Empty, ct);
+            _settings.Merge(new JsonObject
+            {
+                ["LastFm"] = new JsonObject
+                {
+                    ["SessionKey"] = session.SessionKey,
+                    ["Username"] = session.Username,
+                    ["EnableScrobbling"] = true,
+                },
+            });
+            return Ok(new { ok = true, username = session.Username });
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning("Last.fm authorization could not complete: {Message}", ex.Message);
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Returns the *effective* configuration as a JSON document, with values
     /// pulled from the live IOptionsMonitor (so what the app actually sees).
     /// Anything explicitly persisted to settings.json sits on top of env vars
@@ -460,6 +531,7 @@ public class AdminController : ControllerBase
         var soulseek = _soulseekOpts.CurrentValue;
         var lidarr = _lidarrOpts.CurrentValue;
         var lastfm = _lastFmOpts.CurrentValue;
+        var listenBrainz = _listenBrainzOpts.CurrentValue;
         var notif = _notificationOpts.CurrentValue;
 
         var effective = new JsonObject
@@ -522,9 +594,19 @@ public class AdminController : ControllerBase
             ["LastFm"] = new JsonObject
             {
                 ["ApiKey"] = lastfm.ApiKey ?? "",
+                ["ApiSecret"] = lastfm.ApiSecret ?? "",
+                ["SessionKey"] = lastfm.SessionKey ?? "",
+                ["Username"] = lastfm.Username ?? "",
+                ["EnableScrobbling"] = lastfm.EnableScrobbling,
                 ["EnableRadio"] = lastfm.EnableRadio,
                 ["RadioTrackCount"] = lastfm.RadioTrackCount,
                 ["RadioCacheDurationHours"] = lastfm.RadioCacheDurationHours,
+            },
+            ["ListenBrainz"] = new JsonObject
+            {
+                ["EnableScrobbling"] = listenBrainz.EnableScrobbling,
+                ["UserToken"] = listenBrainz.UserToken ?? "",
+                ["BaseUrl"] = listenBrainz.BaseUrl ?? "https://api.listenbrainz.org",
             },
             ["Metadata"] = new JsonObject
             {
@@ -624,7 +706,9 @@ public class AdminController : ControllerBase
             "Lidarr:CompletionMode", "Lidarr:ImportTimeoutSeconds",
             "YouTube:ShimUrl",
             "LastFm:ApiKey", "LastFm:EnableRadio", "LastFm:RadioTrackCount",
-            "LastFm:RadioCacheDurationHours",
+            "LastFm:RadioCacheDurationHours", "LastFm:ApiSecret", "LastFm:SessionKey",
+            "LastFm:Username", "LastFm:EnableScrobbling",
+            "ListenBrainz:EnableScrobbling", "ListenBrainz:UserToken", "ListenBrainz:BaseUrl",
             "Metadata:Language",
             "Notifications:NtfyUrl", "Notifications:NtfyToken",
             "Notifications:DiscordWebhookUrl",
@@ -640,6 +724,8 @@ public class AdminController : ControllerBase
             // page doesn't leak credentials.
             var isSecret = k.EndsWith("Password", StringComparison.OrdinalIgnoreCase)
                         || k.EndsWith("ApiKey", StringComparison.OrdinalIgnoreCase)
+                        || k.EndsWith("Secret", StringComparison.OrdinalIgnoreCase)
+                        || k.EndsWith("SessionKey", StringComparison.OrdinalIgnoreCase)
                         // A Discord webhook URL embeds its token, so the whole URL is
                         // the secret; ntfy tokens are credentials outright.
                         || k.EndsWith("Token", StringComparison.OrdinalIgnoreCase)
@@ -673,6 +759,7 @@ public class AdminController : ControllerBase
             ["lidarr"] = ProbeLidarrAsync(ct),
             ["ytDlpShim"] = ProbeYouTubeShimAsync(ct),
             ["lastfm"] = ProbeLastFmAsync(ct),
+            ["listenbrainz"] = ProbeListenBrainzAsync(ct),
         };
         await Task.WhenAll(probeTasks.Values);
 
@@ -813,6 +900,43 @@ public class AdminController : ControllerBase
             // dispatch works without consuming a real auth slot.
             using var resp = await http.GetAsync($"https://ws.audioscrobbler.com/2.0/?method=track.getInfo&artist=cher&track=believe&api_key={key}&format=json", ct);
             return new ServiceProbe(resp.IsSuccessStatusCode, $"HTTP {(int)resp.StatusCode}");
+        }
+        catch (Exception ex) { return new ServiceProbe(false, ex.Message); }
+    }
+
+    private async Task<ServiceProbe> ProbeListenBrainzAsync(CancellationToken ct)
+    {
+        var settings = _listenBrainzOpts.CurrentValue;
+        if (string.IsNullOrWhiteSpace(settings.UserToken))
+        {
+            return settings.EnableScrobbling
+                ? new ServiceProbe(true, "enabled but token not set", Warning: true)
+                : new ServiceProbe(true, "not configured (optional)");
+        }
+        if (!Uri.TryCreate(settings.BaseUrl, UriKind.Absolute, out var baseUri))
+            return new ServiceProbe(false, "invalid base URL");
+
+        try
+        {
+            var endpoint = new Uri(baseUri, baseUri.AbsolutePath.TrimEnd('/') + "/1/validate-token");
+            using var request = new HttpRequestMessage(HttpMethod.Get, endpoint);
+            request.Headers.TryAddWithoutValidation(
+                "Authorization", "Token " + settings.UserToken.Trim());
+            var http = _httpFactory.CreateClient();
+            http.Timeout = TimeSpan.FromSeconds(5);
+            using var response = await http.SendAsync(request, ct);
+            var body = await response.Content.ReadAsStringAsync(ct);
+            if (!response.IsSuccessStatusCode)
+                return new ServiceProbe(false, $"HTTP {(int)response.StatusCode}");
+
+            using var document = JsonDocument.Parse(body);
+            var valid = document.RootElement.TryGetProperty("valid", out var validElement)
+                && validElement.ValueKind == JsonValueKind.True;
+            var username = document.RootElement.TryGetProperty("user_name", out var userElement)
+                ? userElement.GetString()
+                : null;
+            return new ServiceProbe(valid,
+                valid ? $"token valid{(string.IsNullOrWhiteSpace(username) ? "" : $" · {username}")}" : "token invalid");
         }
         catch (Exception ex) { return new ServiceProbe(false, ex.Message); }
     }

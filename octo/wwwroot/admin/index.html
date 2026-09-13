@@ -69,6 +69,12 @@
             </svg>
             <span>Last.fm</span>
           </button>
+          <button class="sidebar-nav-item" data-tab="listenbrainz">
+            <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
+              <path d="M3 3v10M6 5v6M9 2v12M12 4v8"/>
+            </svg>
+            <span>ListenBrainz</span>
+          </button>
           <button class="sidebar-nav-item" data-tab="notifications">
             <svg class="icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5">
               <path d="M8 2a4 4 0 0 0-4 4v3L2.5 11h11L12 9V6a4 4 0 0 0-4-4z"/><path d="M6.5 13a1.5 1.5 0 0 0 3 0"/>
@@ -206,6 +212,14 @@
             </div>
             <div class="status-card-body">probing…</div>
             <div class="status-card-foot">radio + discovery</div>
+          </article>
+          <article class="status-card" data-svc="listenbrainz">
+            <div class="status-card-head">
+              <span class="status-dot pending"></span>
+              <span class="status-card-title">ListenBrainz</span>
+            </div>
+            <div class="status-card-body">probing…</div>
+            <div class="status-card-foot">temporary-track history</div>
           </article>
         </div>
 
@@ -484,6 +498,39 @@
               </div>
               <input class="set-input" id="f-lastfm-key" name="LastFm.ApiKey" type="password" autocomplete="off" placeholder="32-char hex string" />
             </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Shared secret</div>
+                <div class="set-info-d">Needed only for authenticated scrobbling. It is shown beside the API key on your Last.fm API account page.</div>
+              </div>
+              <input class="set-input" id="f-lastfm-secret" name="LastFm.ApiSecret" type="password" autocomplete="off" placeholder="32-char hex string" />
+            </div>
+          </form>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Temporary-track scrobbling</h3></div>
+          <form data-section="lastfm-scrobbling" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Send temporary tracks</div>
+                <div class="set-info-d">Scrobble Octo's streamed YouTube previews. Local library tracks remain with Navidrome, so they are not submitted twice.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-lastfm-scrobbling" name="LastFm.EnableScrobbling" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Connected account</div>
+                <div class="set-info-d">Save the API key and shared secret above, click Connect, approve Octo in Last.fm, then return here and click Finish.</div>
+              </div>
+              <input class="set-input" id="f-lastfm-username" name="LastFm.Username" readonly placeholder="not connected" />
+              <input class="set-input" id="f-lastfm-session" name="LastFm.SessionKey" type="password" autocomplete="off" placeholder="session key (filled after connection)" />
+              <div class="form-actions-static">
+                <button type="button" class="btn btn-ghost" id="lastfm-auth-start">Connect Last.fm</button>
+                <button type="button" class="btn btn-primary" id="lastfm-auth-complete" hidden>Finish connection</button>
+                <span class="saved-status" id="lastfm-auth-status"></span>
+              </div>
+            </div>
           </form>
         </div>
 
@@ -510,6 +557,48 @@
                 <div class="set-info-d">How long Last.fm responses are cached server-side.</div>
               </div>
               <input class="set-input" id="f-lastfm-cache" name="LastFm.RadioCacheDurationHours" type="number" min="0" />
+            </div>
+          </form>
+        </div>
+      </section>
+
+      <!-- ─── LISTENBRAINZ ──────────────────────────────────── -->
+      <section data-pane="listenbrainz">
+        <header class="page-header">
+          <div>
+            <h1>ListenBrainz</h1>
+            <p>Stores qualified listens for Octo's temporary tracks. <a href="https://listenbrainz.org/settings/" target="_blank" rel="noopener">Copy your user token →</a></p>
+          </div>
+        </header>
+
+        <div class="info-card">
+          <h3 class="info-card-title">No duplicate local listens</h3>
+          <p>Octo submits only temporary external tracks here. Songs already in your library continue through Navidrome and its ListenBrainz plugin.</p>
+        </div>
+
+        <div class="set-section">
+          <div class="set-head"><h3 class="set-title">Scrobbling</h3></div>
+          <form data-section="listenbrainz" class="set-card">
+            <div class="set-row">
+              <div class="set-info">
+                <div class="set-info-t">Send temporary tracks</div>
+                <div class="set-info-d">Send Now Playing at start and a permanent listen after half the track or four minutes.</div>
+              </div>
+              <label class="switch"><input type="checkbox" id="f-listenbrainz-enabled" name="ListenBrainz.EnableScrobbling" /><span class="sw-track"></span><span class="sw-thumb"></span></label>
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">User token</div>
+                <div class="set-info-d">Found in ListenBrainz Settings. Sent only to the configured ListenBrainz server.</div>
+              </div>
+              <input class="set-input" id="f-listenbrainz-token" name="ListenBrainz.UserToken" type="password" autocomplete="off" />
+            </div>
+            <div class="set-row stack">
+              <div class="set-info">
+                <div class="set-info-t">Server URL</div>
+                <div class="set-info-d">Keep the default for listenbrainz.org, or point this at a compatible self-hosted server.</div>
+              </div>
+              <input class="set-input" id="f-listenbrainz-url" name="ListenBrainz.BaseUrl" type="url" placeholder="https://api.listenbrainz.org" />
             </div>
           </form>
         </div>
@@ -754,7 +843,7 @@
             <label for="raw-editor">JSON content</label>
             <textarea id="raw-editor" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" placeholder="{}"></textarea>
             <div class="field-help">
-              Top-level keys: <code>Subsonic</code>, <code>Library</code>, <code>Soulseek</code>, <code>Lidarr</code>, <code>YouTube</code>, <code>LastFm</code>, <code>Metadata</code>.
+              Top-level keys: <code>Subsonic</code>, <code>Library</code>, <code>Soulseek</code>, <code>Lidarr</code>, <code>YouTube</code>, <code>LastFm</code>, <code>ListenBrainz</code>, <code>Metadata</code>.
               Anything you set here overrides the corresponding env var until removed.
             </div>
           </div>
