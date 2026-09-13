@@ -5,6 +5,12 @@ namespace Octo.Tests;
 public sealed class SearchRequestCoordinatorTests
 {
     [Fact]
+    public void DefaultDebounceIsThreeHundredMilliseconds()
+    {
+        Assert.Equal(TimeSpan.FromMilliseconds(300), SearchRequestCoordinator.DefaultDebounce);
+    }
+
+    [Fact]
     public async Task NewerQuerySupersedesEarlierQueryWithoutWaitingForFullDebounce()
     {
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);

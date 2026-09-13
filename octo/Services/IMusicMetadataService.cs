@@ -31,6 +31,16 @@ public interface IMusicMetadataService
     Task<List<Song>> SearchSongsByArtistTitleAsync(string artist, string title, int limit = 1, int? durationSeconds = null);
 
     /// <summary>
+    /// Starts one broad metadata-provider lookup for the user's raw search query and
+    /// primes per-track enrichment caches. The external search pipeline launches this
+    /// alongside Last.fm, then structured artist/title lookups only contact the provider
+    /// for rows the broad result did not cover.
+    /// </summary>
+    /// <returns>The number of distinct track metadata entries added to the cache.</returns>
+    Task<int> PrefetchSearchMetadataAsync(string query, int limit = 25, CancellationToken ct = default)
+        => Task.FromResult(0);
+
+    /// <summary>
     /// Fills in real duration/album/year on external placeholder songs (which
     /// otherwise show a 3:00 fallback) from a metadata provider. Bounded, cached,
     /// best-effort; does not block or fail the search if the provider is down.
