@@ -1,9 +1,8 @@
 using System.Net;
-using System.Text;
-using System.Text.Json;
-using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Moq;
+using Moq.Protected;
 using Octo.Models.Domain;
 using Octo.Models.Settings;
 using Octo.Services;
@@ -12,92 +11,103 @@ using Octo.Services.LastFm;
 
 namespace Octo.Tests;
 
-public sealed class ExternalSearchServiceTests
+public class ExternalSearchServiceTests
 {
-    [Fact]
-    public async Task HealthyTrackSearchSkipsTopTracksAndMovesYouTubeOffCriticalPath()
+    [Theory]
+    [InlineData(50, 0)]
+    [InlineData(5, 1)]
+    public async Task PadsWithTopTracksOnlyWhenTrackSearchIsThin(int searchHits, int expectedTopTrackCalls)
     {
-        var handler = new LastFmSearchHandler(trackCount: 50);
-        var lastFm = new LastFmService(
-            new HttpClient(handler),
-            Options.Create(new LastFmSettings { ApiKey = "test-key" }),
+        var calls = new List<string>();
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync((HttpRequestMessage request, CancellationToken _) =>
+            {
+                var url = request.RequestUri!.ToString();
+                calls.Add(url);
+                var tracks = string.Join(",", Enumerable.Range(1, searchHits)
+                    .Select(i => $$"""{"name":"Song {{i}}","artist":"Artist"}"""));
+                var body = url.Contains("method=track.search")
+                    ? """{"results":{"trackmatches":{"track":[""" + tracks + "]}}}"
+                    : """{"toptracks":{"track":[]}}""";
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(body) };
+            });
+        var lastFm = new LastFmService(new HttpClient(handler.Object),
+            TestOptions.Monitor(new LastFmSettings { ApiKey = "key" }),
             Options.Create(new MetadataSettings()),
-            new Mock<ILogger<LastFmService>>().Object);
+            NullLogger<LastFmService>.Instance);
+        var search = new ExternalSearchService(new Mock<IMusicMetadataService>().Object,
+            NullLogger<ExternalSearchService>.Instance, lastFm);
 
-        var metadata = new Mock<IMusicMetadataService>();
-        metadata.Setup(m => m.SearchSongsByArtistTitleAsync(
-                It.IsAny<string>(), It.IsAny<string>(), 1, It.IsAny<int?>()))
-            .ReturnsAsync((string artist, string title, int _, int? _) =>
-                new List<Song>
-                {
-                    new()
-                    {
-                        Id = $"{artist}|{title}",
-                        Artist = artist,
-                        Title = title,
-                        Duration = 180,
-                        IsLocal = false,
-                    },
-                });
-        metadata.Setup(m => m.EnrichExternalSongsAsync(
-                It.IsAny<List<Song>>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
-        metadata.Setup(m => m.PrewarmYouTubeIdsAsync(
-                It.IsAny<IEnumerable<Song>>(), 12, It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+        await search.GetAsync("artist");
 
-        using var service = new ExternalSearchService(
-            metadata.Object,
-            new Mock<ILogger<ExternalSearchService>>().Object,
-            lastFm);
-
-        var songs = await service.GetAsync("nergal");
-        var continuation = await service.GetAsync(" NERGAL ");
-
-        Assert.Equal(50, songs.Count);
-        Assert.Same(songs, continuation);
-        Assert.Equal(1, handler.TrackSearchCalls);
-        Assert.Equal(0, handler.TopTracksCalls);
-        metadata.Verify(m => m.EnrichExternalSongsAsync(
-            It.IsAny<List<Song>>(), It.IsAny<CancellationToken>()), Times.Once);
-        metadata.Verify(m => m.ResolveTopDurationsAsync(
-            It.IsAny<List<Song>>(), It.IsAny<CancellationToken>()), Times.Never);
-        metadata.Verify(m => m.PrewarmYouTubeIdsAsync(
-            It.IsAny<IEnumerable<Song>>(), 12, It.IsAny<CancellationToken>()), Times.Once);
+        Assert.Equal(expectedTopTrackCalls, calls.Count(url => url.Contains("method=artist.gettoptracks")));
     }
 
-    private sealed class LastFmSearchHandler(int trackCount) : HttpMessageHandler
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task SearchWaitsForYouTubeDurationsOnlyWhenConfigured(bool waitForDurations)
     {
-        public int TrackSearchCalls { get; private set; }
-        public int TopTracksCalls { get; private set; }
+        var durations = new TaskCompletionSource();
+        var started = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var metadata = new Mock<IMusicMetadataService>();
+        metadata.Setup(m => m.SearchSongsByArtistTitleAsync("Artist", "Song", 1, null))
+            .ReturnsAsync([new Song { Artist = "Artist", Title = "Song" }]);
+        metadata.Setup(m => m.ResolveTopDurationsAsync(It.IsAny<List<Song>>(), It.IsAny<CancellationToken>(), It.IsAny<bool>()))
+            .Callback((List<Song> _, CancellationToken _, bool background) => started.TrySetResult(background))
+            .Returns(durations.Task);
+        var search = new ExternalSearchService(metadata.Object, NullLogger<ExternalSearchService>.Instance,
+            OneHitLastFm(), TestOptions.Monitor(new SubsonicSettings { WaitForSearchDurations = waitForDurations }));
 
-        protected override Task<HttpResponseMessage> SendAsync(
-            HttpRequestMessage request,
-            CancellationToken cancellationToken)
-        {
-            var query = request.RequestUri?.Query ?? "";
-            string body;
+        var result = search.GetAsync("song");
+        var background = await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
-            if (query.Contains("method=track.search", StringComparison.Ordinal))
-            {
-                TrackSearchCalls++;
-                var tracks = Enumerable.Range(1, trackCount)
-                    .Select(i => new { name = $"Track {i}", artist = $"Artist {i}" });
-                body = JsonSerializer.Serialize(new
-                {
-                    results = new { trackmatches = new { track = tracks } },
-                });
-            }
-            else
-            {
-                TopTracksCalls++;
-                body = "{\"toptracks\":{\"track\":[]}}";
-            }
+        // The durations pass is still running, so only a search that does not wait can be done.
+        Assert.Equal(!waitForDurations, background);
+        if (waitForDurations) Assert.False(result.IsCompleted);
+        else Assert.Single(await result.WaitAsync(TimeSpan.FromSeconds(5)));
+        durations.SetResult();
+        Assert.Single(await result.WaitAsync(TimeSpan.FromSeconds(5)));
+    }
 
-            return Task.FromResult(new HttpResponseMessage(HttpStatusCode.OK)
+    [Fact]
+    public async Task BackgroundDurationsRunBeforeTheVideoPrewarm()
+    {
+        var durations = new TaskCompletionSource();
+        var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var prewarmed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var metadata = new Mock<IMusicMetadataService>();
+        metadata.Setup(m => m.SearchSongsByArtistTitleAsync("Artist", "Song", 1, null))
+            .ReturnsAsync([new Song { Artist = "Artist", Title = "Song" }]);
+        metadata.Setup(m => m.ResolveTopDurationsAsync(It.IsAny<List<Song>>(), It.IsAny<CancellationToken>(), true))
+            .Callback(() => started.TrySetResult()).Returns(durations.Task);
+        metadata.Setup(m => m.PrewarmYouTubeIdsAsync(It.IsAny<IEnumerable<Song>>(), 12, It.IsAny<CancellationToken>()))
+            .Callback(() => prewarmed.TrySetResult()).Returns(Task.CompletedTask);
+        var search = new ExternalSearchService(metadata.Object, NullLogger<ExternalSearchService>.Instance,
+            OneHitLastFm(), TestOptions.Monitor(new SubsonicSettings { WaitForSearchDurations = false }));
+
+        await search.GetAsync("song").WaitAsync(TimeSpan.FromSeconds(5));
+        await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.False(prewarmed.Task.IsCompleted);
+
+        durations.SetResult();
+        await prewarmed.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    }
+
+    private static LastFmService OneHitLastFm()
+    {
+        var handler = new Mock<HttpMessageHandler>();
+        handler.Protected()
+            .Setup<Task<HttpResponseMessage>>("SendAsync", ItExpr.IsAny<HttpRequestMessage>(), ItExpr.IsAny<CancellationToken>())
+            .ReturnsAsync(() => new HttpResponseMessage(HttpStatusCode.OK)
             {
-                Content = new StringContent(body, Encoding.UTF8, "application/json"),
+                Content = new StringContent("""{"results":{"trackmatches":{"track":[{"name":"Song","artist":"Artist"}]}}}"""),
             });
-        }
+        return new LastFmService(new HttpClient(handler.Object),
+            TestOptions.Monitor(new LastFmSettings { ApiKey = "key" }),
+            Options.Create(new MetadataSettings()),
+            NullLogger<LastFmService>.Instance);
     }
 }

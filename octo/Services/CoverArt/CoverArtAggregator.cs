@@ -42,24 +42,17 @@ public class CoverArtAggregator : IDisposable
             _sources.Count, string.Join(", ", _sources.Select(s => s.Name)));
     }
 
-    public async Task<byte[]?> GetCoverAsync(SoulseekRouting routing, CancellationToken ct = default)
+    public async Task<byte[]?> GetCoverAsync(SoulseekRouting routing, bool background = false, CancellationToken ct = default)
     {
         var cacheKey = MakeCacheKey(routing);
         if (_cache.TryGetValue(cacheKey, out Entry? cached)) return cached!.Bytes;
 
         foreach (var source in _sources)
         {
-            // Other providers receive only the display name and cannot identify
-            // which namesake a Deezer id or a source recording refers to.
-            if (routing.Kind == RoutingKind.Artist
-                && (!string.IsNullOrWhiteSpace(routing.ExternalArtistId)
-                    || !string.IsNullOrWhiteSpace(routing.Title))
-                && source.Name != "deezer") continue;
-
             byte[]? bytes;
             try
             {
-                bytes = await source.TryFetchAsync(routing, ct);
+                bytes = await source.TryFetchAsync(routing, background, ct);
             }
             catch (Exception ex)
             {
@@ -98,10 +91,6 @@ public class CoverArtAggregator : IDisposable
 
     private static string MakeCacheKey(SoulseekRouting r)
     {
-        if (r.Kind == RoutingKind.Artist && !string.IsNullOrWhiteSpace(r.ExternalArtistId))
-            return $"artist|deezer:{r.ExternalArtistId}";
-        if (r.Kind == RoutingKind.Album && !string.IsNullOrWhiteSpace(r.ExternalAlbumId))
-            return $"album|deezer:{r.ExternalAlbumId}";
         var artist = (r.Artist ?? "").Trim().ToLowerInvariant();
         var albumOrTitle = (r.Kind == RoutingKind.Album
                 ? (r.Album ?? r.Title ?? "")

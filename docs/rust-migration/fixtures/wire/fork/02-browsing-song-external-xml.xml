@@ -1,0 +1,3 @@
+<subsonic-response status="ok" version="1.16.1" xmlns="http://subsonic.org/restapi">
+  <song id="CwoXcVhGn95tWIOvqaFKt6" parent="wIfqpf1IeFS337TdaMfNC3" isDir="false" title="Glass Harbor" album="Glass Harbor" artist="Zephyr Echo" track="1" genre="" coverArt="CwoXcVhGn95tWIOvqaFKt6" contentType="audio/mp4" suffix="m4a" duration="3" bitRate="128" albumId="wIfqpf1IeFS337TdaMfNC3" artistId="15lrbRkYQzfJuRgM122K50" type="music" isVideo="false" mediaType="song" displayArtist="Zephyr Echo" displayAlbumArtist="Zephyr Echo" explicitStatus="" sortName="glass harbor" isExternal="true" />
+</subsonic-response>

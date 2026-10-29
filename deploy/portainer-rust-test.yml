@@ -1,0 +1,60 @@
+# Separate test stack for Octo 2026.10.22.1 + AAC/M4A and artist catalog ids.
+# Before deploying: wait for Docker Build & Push on the feature branch to succeed.
+# /run/openbao-env/octo.env supplies Subsonic__AdminUsername,
+# Subsonic__AdminPassword and optionally LastFm__ApiKey.
+services:
+  octo:
+    image: ghcr.io/xrybax/octo:feat-rust-m4a-artist-identity
+    restart: unless-stopped
+    ports:
+      - "5277:8080"
+    env_file:
+      - /run/openbao-env/octo.env
+    environment:
+      TZ: Europe/Warsaw
+      Subsonic__Url: "http://192.168.1.65:4533"
+      Subsonic__AutoDetectDownloadPath: "false"
+      Subsonic__StorageMode: Stream
+      Subsonic__DownloadSource: YouTube
+      Subsonic__DownloadMode: Track
+      Subsonic__DownloadOnStar: "true"
+      Subsonic__DownloadAlbumOnStar: "false"
+      Subsonic__WaitForLosslessOnPlay: "false"
+      Subsonic__FolderStructure: Organized
+      Library__DownloadPath: /music
+      YouTube__ShimUrl: "http://yt-dlp-shim:8080"
+      Updates__Check: "false"
+    volumes:
+      - /home/master/music:/music
+      - /opt/octo-rust-test/config:/app/config
+    depends_on:
+      yt-dlp-shim:
+        condition: service_healthy
+
+  yt-dlp-shim:
+    image: ghcr.io/xrybax/octo-yt-dlp-shim:feat-rust-m4a-artist-identity
+    restart: unless-stopped
+    environment:
+      TZ: Europe/Warsaw
+      YTDLP_AUDIO_FORMAT: "140/bestaudio[ext=m4a]"
+      MAX_CONCURRENT_YTDLP: "5"
+      GATE_RESERVE_INTERACTIVE: "2"
+      DOWNLOAD_ROOT: /music
+      YTDLP_PATH: /opt/ytdlp/yt-dlp
+      META_DB_PATH: /var/lib/ytshim/meta.db
+    volumes:
+      - /home/master/music:/music
+      - ytdlp-cache:/root/.cache/yt-dlp
+      - ytshim-cache:/var/lib/ytshim
+      - ytdlp-bin:/opt/ytdlp
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+volumes:
+  ytdlp-cache:
+  ytshim-cache:
+  ytdlp-bin:

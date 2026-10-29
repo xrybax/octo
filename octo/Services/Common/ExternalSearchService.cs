@@ -1,7 +1,7 @@
+using Microsoft.Extensions.Options;
 using Octo.Models.Domain;
+using Octo.Models.Settings;
 using Octo.Services.LastFm;
-using System.Diagnostics;
-using Microsoft.Extensions.Caching.Memory;
 
 namespace Octo.Services.Common;
 
@@ -22,7 +22,7 @@ namespace Octo.Services.Common;
 /// from the registry rather than from a search result. Any future "top up the enrichment
 /// because this caller wanted more rows" belongs inside the build, not after it.
 /// </summary>
-public sealed class ExternalSearchService : IDisposable
+public sealed class ExternalSearchService
 {
     /// <summary>
     /// Rows built per query, regardless of how many the caller wants.
@@ -35,12 +35,9 @@ public sealed class ExternalSearchService : IDisposable
     /// </summary>
     public const int BuildSize = 60;
 
-    /// <summary>
-    /// A normal Subsonic search page asks for 20 songs. Artist top-tracks is therefore
-    /// only a fallback for a genuinely thin track.search response, not a mandatory
-    /// second Last.fm request just to grow an already useful 50 rows to 60.
-    /// </summary>
-    private const int TopTracksFallbackThreshold = 20;
+    // track.search returns at most 50 rows, so padding whenever the list was short of
+    // BuildSize made the second, sequential Last.fm call on every search.
+    private const int ThinSearchThreshold = 20;
 
     /// <summary>
     /// Deadline for one build. Last.fm has no configured HTTP timeout of its own, so
@@ -48,32 +45,33 @@ public sealed class ExternalSearchService : IDisposable
     /// </summary>
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromSeconds(10);
 
-    /// <summary>
-    /// Continuation requests repeat the same query with a larger songOffset. Keep the
-    /// frozen candidate set briefly so page two is both instant and ordered exactly like
-    /// page one. This is deliberately small and short-lived: it is pagination state, not
-    /// a general attempt to cache everything a user may ever type.
-    /// </summary>
-    private static readonly TimeSpan ResultTtl = TimeSpan.FromMinutes(10);
-    private const int ResultCacheEntries = 64;
+    /// <summary>Deadline for one album build. Deezer's own client timeout already bounds
+    /// the call inside it; this is the ceiling on the whole build.</summary>
+    private static readonly TimeSpan AlbumBuildTimeout = TimeSpan.FromSeconds(10);
 
-    private readonly SingleFlight<string, List<Song>> _flight = new();
-    private readonly MemoryCache _results = new(new MemoryCacheOptions
-    {
-        SizeLimit = ResultCacheEntries,
-    });
+    // Amperfy (and most Subsonic clients' type-ahead) fires one search3 call per
+    // keystroke, uncancelled. Plain SingleFlight only collapses two callers asking for
+    // the SAME query; it does nothing for the sequence "cage", "cage t", "cage the",
+    // where each keystroke is a distinct key racing the same rate-limited lane as the
+    // query the user actually meant. SupersedableBuildCoordinator adds prefix-based
+    // cancellation on top of that collapsing.
+    private readonly SupersedableBuildCoordinator<List<Song>> _songBuilds = new();
+    private readonly SupersedableBuildCoordinator<List<Album>> _albumBuilds = new();
     private readonly IMusicMetadataService _metadata;
     private readonly LastFmService? _lastFm;
+    private readonly IOptionsMonitor<SubsonicSettings>? _subsonic;
     private readonly ILogger<ExternalSearchService> _logger;
 
     public ExternalSearchService(
         IMusicMetadataService metadata,
         ILogger<ExternalSearchService> logger,
-        LastFmService? lastFm = null)
+        LastFmService? lastFm = null,
+        IOptionsMonitor<SubsonicSettings>? subsonic = null)
     {
         _metadata = metadata;
         _logger = logger;
         _lastFm = lastFm;
+        _subsonic = subsonic;
     }
 
     /// <summary>
@@ -88,43 +86,35 @@ public sealed class ExternalSearchService : IDisposable
         // the search results too.
         if (_lastFm is null || !_lastFm.HasApiKey) return Array.Empty<Song>();
 
-        // Key on the query alone. The build size is constant, so two callers wanting
-        // different row counts still want the same work done.
-        var key = query.Trim().ToLowerInvariant();
-        if (_results.TryGetValue(key, out List<Song>? cached) && cached is not null)
-            return cached;
-
-        try
-        {
-            return await _flight.RunAsync(key, async token =>
-            {
-                var built = await BuildAsync(query, token);
-                if (built.Count > 0)
-                {
-                    // Publish before completing the single-flight task. Otherwise a
-                    // continuation request arriving in the tiny remove/set gap could
-                    // start a redundant build and receive a differently ordered page.
-                    _results.Set(key, built, new MemoryCacheEntryOptions
-                    {
-                        AbsoluteExpirationRelativeToNow = ResultTtl,
-                        Size = 1,
-                    });
-                }
-                return built;
-            }, BuildTimeout);
-        }
-        catch (Exception ex)
-        {
-            // Discovery is an addition to search, never a precondition for it. The steps
-            // inside the build are individually best-effort, but the deadline is not: the
-            // enrichment fan-out waits on its semaphore outside its own try, so a timeout
-            // there would otherwise escape and take the user's local results down with it.
-            _logger.LogDebug("external search '{Q}' failed: {M}", query, ex.Message);
-            return Array.Empty<Song>();
-        }
+        return await _songBuilds.RunAsync(
+            query.Trim(),
+            token => BuildAsync(query, token),
+            BuildTimeout,
+            fallback: new List<Song>(),
+            onFailure: (q, ex) =>
+                // Discovery is an addition to search, never a precondition for it. The
+                // steps inside the build are individually best-effort, but the deadline is
+                // not: the enrichment fan-out waits on its semaphore outside its own try, so
+                // a timeout there would otherwise escape and take local results down with it.
+                _logger.LogDebug("external search '{Q}' failed: {M}", q, ex.Message));
     }
 
-    public void Dispose() => _results.Dispose();
+    /// <summary>
+    /// Up to <paramref name="limit"/> external albums for this query, via the same
+    /// prefix-supersession as <see cref="GetAsync"/>. Needs no Last.fm key: Deezer's
+    /// album catalog is keyless.
+    /// </summary>
+    public async Task<IReadOnlyList<Album>> GetAlbumsAsync(string query, int limit, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(query) || limit <= 0) return Array.Empty<Album>();
+
+        return await _albumBuilds.RunAsync(
+            query,
+            token => _metadata.SearchAlbumsAsync(query, limit, token),
+            AlbumBuildTimeout,
+            fallback: new List<Album>(),
+            onFailure: (q, ex) => _logger.LogDebug("external album search '{Q}' failed: {M}", q, ex.Message));
+    }
 
     /// <summary>
     /// Fans out to Last.fm, then fills in the metadata a client needs to render and play
@@ -132,109 +122,94 @@ public sealed class ExternalSearchService : IDisposable
     ///   1. track.search hits (best fuzzy matches for the query as typed)
     ///   2. canonical artist's top tracks (in case (1) was thin — common for
     ///      single-word artist queries)
-    /// Deduped by artist+title so the same track cannot appear twice.
+    /// Deduped by SongIdentity.MatchKey, so the same track cannot appear twice however its
+    /// artist and title are written.
     /// </summary>
     private async Task<List<Song>> BuildAsync(string query, CancellationToken ct)
     {
-        var totalWatch = Stopwatch.StartNew();
-        var stageWatch = Stopwatch.StartNew();
-        var stage = "lastfm";
-        var outcome = "failed";
-        long lastFmMs = -1;
-        long placeholdersMs = -1;
-        long deezerMs = -1;
-        long youtubeMs = -1;
-        var songCount = 0;
-
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var collected = new List<(string Artist, string Title)>();
-        try
+
+        // Last.fm's search carries rows from mislabelled scrobbles; put their names right first,
+        // or they reach the results, the player and each listener's Last.fm as they are.
+        var tracks = LastFmSearchCleanup.Clean(await _lastFm!.SearchTracksAsync(query, Math.Min(50, BuildSize * 2)));
+        foreach (var t in tracks)
         {
-            var tracks = await _lastFm!.SearchTracksAsync(query, Math.Min(50, BuildSize * 2));
-            foreach (var t in tracks)
+            var key = SongIdentity.MatchKey(t.Artist, t.Title);
+            if (seen.Add(key)) collected.Add((t.Artist, t.Title));
+            if (collected.Count >= BuildSize) break;
+        }
+
+        if (collected.Count < ThinSearchThreshold)
+        {
+            // Use the first track-search hit's artist as the canonical anchor
+            // for top-tracks padding. Falls back to the raw query string when
+            // track.search came back empty.
+            var anchor = tracks.Count > 0 ? tracks[0].Artist : query;
+            var topTracks = await _lastFm.GetArtistTopTracksAsync(anchor, BuildSize * 2);
+            foreach (var t in topTracks)
             {
-                var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
+                var key = SongIdentity.MatchKey(t.Artist, t.Title);
                 if (seen.Add(key)) collected.Add((t.Artist, t.Title));
                 if (collected.Count >= BuildSize) break;
             }
-
-            if (collected.Count < TopTracksFallbackThreshold)
-            {
-                // Use the first track-search hit's artist as the canonical anchor
-                // for top-tracks fallback. Falls back to the raw query string when
-                // track.search came back empty. Fill up to BuildSize once the fallback
-                // is needed, but do not make this second HTTP request for a healthy page.
-                var anchor = tracks.Count > 0 ? tracks[0].Artist : query;
-                var topTracks = await _lastFm.GetArtistTopTracksAsync(anchor, BuildSize * 2);
-                foreach (var t in topTracks)
-                {
-                    var key = $"{t.Artist}|{t.Title}".ToLowerInvariant();
-                    if (seen.Add(key)) collected.Add((t.Artist, t.Title));
-                    if (collected.Count >= BuildSize) break;
-                }
-            }
-
-            lastFmMs = stageWatch.ElapsedMilliseconds;
-            stage = "placeholders";
-            stageWatch.Restart();
-
-            var songs = new List<Song>(collected.Count);
-            foreach (var (artist, title) in collected)
-            {
-                var hits = await _metadata.SearchSongsByArtistTitleAsync(artist, title, 1);
-                if (hits.Count > 0) songs.Add(hits[0]);
-            }
-            songCount = songs.Count;
-            placeholdersMs = stageWatch.ElapsedMilliseconds;
-            _logger.LogInformation("External search '{Q}' -> {N} placeholder songs", query, songs.Count);
-
-            // Album/art/duration from Deezer. Release year stays lazy because it would
-            // add one extra Deezer request for every foreground row.
-            stage = "deezer";
-            stageWatch.Restart();
-            await _metadata.EnrichExternalSongsAsync(songs, ct);
-            deezerMs = stageWatch.ElapsedMilliseconds;
-
-            // YouTube is deliberately outside the response's critical path. The Deezer
-            // duration is accurate enough to render search results; resolving the exact
-            // YouTube upload synchronously imposed a ~2.3 s floor even on a healthy shim.
-            // Prewarm updates routing only, so the frozen Song list remains safe to
-            // serialize while video ids and stream URLs are prepared in the background.
-            stage = "youtube-background";
-            youtubeMs = 0;
-            _ = _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
-
-            stage = "done";
-            outcome = "completed";
-            return songs;
         }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested)
-        {
-            outcome = "timeout";
-            throw;
-        }
-        finally
-        {
-            var partialMs = stageWatch.ElapsedMilliseconds;
-            switch (stage)
-            {
-                case "lastfm" when lastFmMs < 0: lastFmMs = partialMs; break;
-                case "placeholders" when placeholdersMs < 0: placeholdersMs = partialMs; break;
-                case "deezer" when deezerMs < 0: deezerMs = partialMs; break;
-                case "youtube" when youtubeMs < 0: youtubeMs = partialMs; break;
-            }
 
-            _logger.LogInformation(
-                "External search timing '{Q}': outcome={Outcome} stopped_at={Stage} lastfm_ms={LastFmMs} placeholders_ms={PlaceholdersMs} deezer_ms={DeezerMs} youtube_ms={YouTubeMs} youtube_mode=background total_ms={TotalMs} songs={Songs}",
-                query,
-                outcome,
-                stage,
-                lastFmMs,
-                placeholdersMs,
-                deezerMs,
-                youtubeMs,
-                totalWatch.ElapsedMilliseconds,
-                songCount);
+        var songs = new List<Song>(collected.Count);
+        foreach (var (artist, title) in collected)
+        {
+            var hits = await _metadata.SearchSongsByArtistTitleAsync(artist, title, 1);
+            if (hits.Count > 0) songs.Add(hits[0]);
+        }
+        _logger.LogInformation("External search '{Q}' -> {N} placeholder songs", query, songs.Count);
+
+        // Album/art/year from Deezer (fast), then the ACCURATE duration for the top of the
+        // list from the real YouTube video (so the scrub bar matches the audio and the
+        // client advances correctly). Bounded + cached.
+        await _metadata.EnrichExternalSongsAsync(songs, ct);
+        var waitForDurations = _subsonic?.CurrentValue.WaitForSearchDurations ?? true;
+        if (waitForDurations) await _metadata.ResolveTopDurationsAsync(songs, ct);
+
+        // Fire-and-forget: pre-resolve YouTube videoIds for the top hits so the first
+        // /rest/stream click doesn't pay the cold yt-dlp double-call cost (ytsearch1: + -g,
+        // 6-16s combined). Arpeggi cancels at ~10s and falls back to a local song; without
+        // this, external playback is unreachable from that client. 12 is about what fits on
+        // the first page of search results.
+        //
+        // It runs LAST on purpose. It used to run before enrichment, where it wrote a
+        // videoId chosen with no duration hint while ResolveTopDurationsAsync was choosing
+        // a different one using the Deezer duration — so for the top rows the two raced and
+        // the loser could leave a song advertising the length of a video that would not be
+        // the one played.
+        _ = waitForDurations
+            ? _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12)
+            : Task.Run(() => ResolveDurationsThenPrewarmAsync(songs));
+
+        // Same reasoning, for cover art: a client renders the first screen of results a
+        // moment after this returns, and without a prewarm each row's getCoverArt call
+        // pays for the Deezer/iTunes/Last.fm chain itself, one row at a time. 24 covers
+        // more than a screenful so scrolling a little still finds a warm cache.
+        _ = _metadata.PrewarmCoverArtAsync(songs, topN: 24);
+
+        return songs;
+    }
+
+    /// <summary>
+    /// The durations pass search did not wait for, then the videoId prewarm, in that order
+    /// for the reason given in BuildAsync. It runs in background mode, so the songs this
+    /// build returned stay frozen.
+    /// </summary>
+    private async Task ResolveDurationsThenPrewarmAsync(List<Song> songs)
+    {
+        try
+        {
+            await _metadata.ResolveTopDurationsAsync(songs, CancellationToken.None, background: true);
+            await _metadata.PrewarmYouTubeIdsAsync(songs, topN: 12);
+        }
+        catch (Exception ex)
+        {
+            // Nothing awaits this, so an exception would only surface as an unobserved task.
+            _logger.LogDebug(ex, "Background duration pass failed for {Count} songs", songs.Count);
         }
     }
 }

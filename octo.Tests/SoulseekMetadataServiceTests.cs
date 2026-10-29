@@ -1,11 +1,16 @@
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Moq;
 using Moq.Protected;
+using Octo.Models.Domain;
+using Octo.Models.Settings;
+using Octo.Services.CoverArt;
 using Octo.Services.Metadata;
 using Octo.Services.Soulseek;
 using Octo.Services.Subsonic;
 using Octo.Services.YouTube;
+using System.Collections.Concurrent;
 using System.Net;
 
 namespace Octo.Tests;
@@ -14,21 +19,25 @@ public class SoulseekMetadataServiceTests
 {
     private readonly ExternalIdRegistry _registry = new();
 
+    /// <summary>Every url the fake catalog was asked for.</summary>
+    private readonly ConcurrentQueue<string> _calls = new();
+
     /// <summary>Builds the service with a Deezer layer answering from a url-substring map.
-    /// YouTube is never reached by the album paths under test.</summary>
-    private SoulseekMetadataService BuildService(
-        Dictionary<string, string> routes,
-        Action<Uri>? onRequest = null)
+    /// YouTube is never reached by the album paths under test. Given a gate, the catalog
+    /// answers nothing until it opens, so callers started together are all in flight before
+    /// any hears back, however slow the machine.</summary>
+    private SoulseekMetadataService BuildService(Dictionary<string, string> routes, Task? gate = null)
     {
         var handler = new Mock<HttpMessageHandler>();
         handler.Protected()
             .Setup<Task<HttpResponseMessage>>("SendAsync",
                 ItExpr.IsAny<HttpRequestMessage>(),
                 ItExpr.IsAny<CancellationToken>())
-            .ReturnsAsync((HttpRequestMessage req, CancellationToken _) =>
+            .Returns(async (HttpRequestMessage req, CancellationToken _) =>
             {
                 var url = req.RequestUri!.ToString();
-                onRequest?.Invoke(req.RequestUri);
+                _calls.Enqueue(url);
+                if (gate is not null) await gate;
                 foreach (var (needle, body) in routes)
                 {
                     if (url.Contains(needle, StringComparison.OrdinalIgnoreCase))
@@ -47,8 +56,11 @@ public class SoulseekMetadataServiceTests
             TestOptions.Monitor(new Octo.Models.Settings.MetadataSettings()),
             new Mock<ILogger<DeezerMetadataService>>().Object);
 
+        var coverArt = new CoverArtAggregator(
+            Array.Empty<ICoverArtSource>(), new Mock<ILogger<CoverArtAggregator>>().Object);
+
         return new SoulseekMetadataService(
-            youtube, _registry, deezer, new Mock<ILogger<SoulseekMetadataService>>().Object);
+            youtube, _registry, deezer, coverArt, new Mock<ILogger<SoulseekMetadataService>>().Object);
     }
 
     private const string AlbumSearchJson = @"{""data"":[
@@ -62,264 +74,6 @@ public class SoulseekMetadataServiceTests
     private const string AlbumTracksJson = @"{""total"":2,""data"":[
         {""title"":""Track One"",""duration"":180,""track_position"":1,""disk_number"":1,""artist"":{""name"":""Test Artist""}},
         {""title"":""Track Two"",""duration"":240,""track_position"":2,""disk_number"":1,""artist"":{""name"":""Test Artist""}}]}";
-
-    private const string ArtistSearchJson = @"{""data"":[
-        {""id"":42,""name"":""Test Artist"",""nb_album"":3,
-         ""picture_xl"":""https://cdn/artist.jpg""}]}";
-
-    private const string ArtistAlbumsJson = @"{""total"":3,""data"":[
-        {""id"":10,""title"":""Full Album"",""record_type"":""album"",""nb_tracks"":10,
-         ""release_date"":""2020-01-01"",""cover_xl"":""https://cdn/lp.jpg""},
-        {""id"":11,""title"":""Short EP"",""record_type"":""ep"",""nb_tracks"":4,
-         ""release_date"":""2021-01-01""},
-        {""id"":12,""title"":""New Single"",""record_type"":""single"",""nb_tracks"":1,
-         ""release_date"":""2022-01-01""}]}";
-
-    private const string TrackSearchJson = @"{""data"":[
-        {""id"":100,""title"":""Test Track"",""duration"":205,
-         ""album"":{""id"":99,""title"":""Test Album"",""cover_xl"":""https://cdn/track.jpg""},
-         ""artist"":{""id"":42,""name"":""Test Artist"",""picture_xl"":""https://cdn/artist.jpg""}}]}";
-
-    [Fact]
-    public async Task SearchEnrichmentSkipsPerTrackAlbumYearRequest()
-    {
-        var requested = new List<string>();
-        var svc = BuildService(
-            new() { ["/search?"] = TrackSearchJson },
-            uri => requested.Add(uri.AbsolutePath));
-        var songs = await svc.SearchSongsByArtistTitleAsync("Test Artist", "Test Track");
-
-        await svc.EnrichExternalSongsAsync(songs);
-
-        var song = Assert.Single(songs);
-        Assert.Equal("Test Album", song.Album);
-        Assert.Equal(205, song.Duration);
-        Assert.Null(song.Year);
-        Assert.DoesNotContain("/album/99", requested);
-
-        Assert.NotNull(song.ArtistId);
-        Assert.NotNull(song.AlbumId);
-        Assert.Equal("42", _registry.Lookup(song.ArtistId!)!.ExternalArtistId);
-        Assert.Equal("99", _registry.Lookup(song.AlbumId!)!.ExternalAlbumId);
-        Assert.Equal("42", _registry.Lookup(song.AlbumId!)!.ExternalArtistId);
-
-        var songRouting = _registry.Lookup(song.Id)!;
-        Assert.Equal("42", songRouting.ExternalArtistId);
-        Assert.Equal("99", songRouting.ExternalAlbumId);
-    }
-
-    [Fact]
-    public async Task AlbumDownloadReload_PreservesSharedReleaseAndSeparatesOtherEditions()
-    {
-        var svc = BuildService(new()
-        {
-            ["/album/1/tracks"] = AlbumTracksJson,
-            ["/album/1"] = AlbumDetailJson,
-            ["/album/2/tracks"] = AlbumTracksJson,
-            ["/album/2"] = AlbumDetailJson.Replace("Test Album", "Best Of").Replace("1997", "2024"),
-        });
-        var firstId = _registry.Register(new SoulseekRouting
-            { Kind = RoutingKind.Album, Artist = "Test Artist", Album = "Test Album", ExternalAlbumId = "1" });
-        var secondId = _registry.Register(new SoulseekRouting
-            { Kind = RoutingKind.Album, Artist = "Test Artist", Album = "Best Of", ExternalAlbumId = "2" });
-        var first = (await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, firstId))!;
-        var second = (await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, secondId))!;
-
-        Assert.Empty(first.Songs.Select(s => s.Id).Intersect(second.Songs.Select(s => s.Id)));
-        foreach (var album in new[] { first, second })
-        foreach (var original in album.Songs)
-        {
-            var reloaded = (await svc.GetSongAsync(SoulseekMetadataService.ProviderName, original.Id))!;
-            Assert.Equal(album.Title, reloaded.Album);
-            Assert.Equal(album.Artist, reloaded.AlbumArtist);
-            Assert.Equal(album.Year, reloaded.Year);
-            Assert.Equal(album.CoverArtUrl, reloaded.CoverArtUrlLarge);
-            Assert.Equal(album.Songs.Count, reloaded.TotalTracks);
-            Assert.Equal(original.Track, reloaded.Track);
-            Assert.Equal(original.DiscNumber, reloaded.DiscNumber);
-            Assert.NotNull(reloaded.Release);
-        }
-        // The same snapshot can restore an evicted routing without changing its id.
-        var track = second.Songs[0];
-        var restored = new ExternalIdRegistry().Register(new SoulseekRouting
-        {
-            Artist = track.Artist, Title = track.Title, Album = track.Album,
-            Duration = track.Duration, Track = track.Track, DiscNumber = track.DiscNumber,
-            Release = track.Release,
-        });
-        Assert.Equal(track.Id, restored);
-    }
-
-    [Fact]
-    public async Task ContinuationPage_EnrichesEveryDisplayedRowBeyondFirstPageLimit()
-    {
-        var svc = BuildService(new() { ["/search?"] = TrackSearchJson });
-        var songs = new List<Octo.Models.Domain.Song>();
-        for (var i = 1; i <= 20; i++)
-        {
-            songs.Add(Assert.Single(await svc.SearchSongsByArtistTitleAsync(
-                "Test Artist", $"Track {i}")));
-        }
-
-        await svc.EnrichExternalSearchPageAsync(songs);
-
-        Assert.All(songs, song =>
-        {
-            Assert.NotNull(song.ArtistId);
-            Assert.NotNull(song.AlbumId);
-            Assert.Equal("42", _registry.Lookup(song.ArtistId!)!.ExternalArtistId);
-            Assert.Equal("99", _registry.Lookup(song.AlbumId!)!.ExternalAlbumId);
-        });
-    }
-
-    [Fact]
-    public async Task AlbumOpenedFromSearchSong_UsesExactProviderIdAndReturnsFullTracklist()
-    {
-        var requested = new List<string>();
-        var svc = BuildService(new()
-        {
-            ["/album/99/tracks"] = AlbumTracksJson,
-            ["/album/99"] = AlbumDetailJson,
-            ["/search?"] = TrackSearchJson,
-        }, uri => requested.Add(uri.ToString()));
-        var song = Assert.Single(await svc.SearchSongsByArtistTitleAsync(
-            "Test Artist", "Test Track"));
-        await svc.EnrichExternalSongsAsync(new List<Octo.Models.Domain.Song> { song });
-
-        var album = await svc.GetAlbumAsync(
-            SoulseekMetadataService.ProviderName, song.AlbumId!);
-
-        Assert.NotNull(album);
-        Assert.Equal(2, album!.Songs.Count);
-        Assert.Contains(requested, url => url.Contains("/album/99", StringComparison.Ordinal));
-        Assert.DoesNotContain(requested,
-            url => url.Contains("/search/album", StringComparison.Ordinal));
-    }
-
-    [Fact]
-    public async Task SearchArtists_PreservesNamesakesInsteadOfChoosingLargestCatalog()
-    {
-        const string ambiguousArtists = @"{""data"":[
-            {""id"":1,""name"":""Feel Good"",""nb_album"":100},
-            {""id"":2,""name"":""Feel"",""nb_album"":1},
-            {""id"":3,""name"":""FEEL"",""nb_album"":6}
-        ]}";
-        var svc = BuildService(new() { ["/search/artist"] = ambiguousArtists });
-
-        var artists = await svc.SearchArtistsAsync("Feel", 3);
-
-        Assert.Equal(new[] { "Feel", "FEEL", "Feel Good" }, artists.Select(a => a.Name));
-        Assert.Equal(new[] { "2", "3", "1" },
-            artists.Select(a => _registry.Lookup(a.Id)!.ExternalArtistId));
-        Assert.Equal(3, artists.Select(a => a.Id).Distinct().Count());
-    }
-
-    [Theory]
-    [InlineData(true)]
-    [InlineData(false)]
-    public async Task SongReloadThenArtistNavigation_KeepsRecordingIdentity(bool enriched)
-    {
-        // Synthetic namesakes: the generic artist endpoint deliberately lists the
-        // wrong Feel. The clicked recording carries the authoritative artist id.
-        var requested = new List<Uri>();
-        var svc = BuildService(new()
-        {
-            ["/search/artist"] = """{"data":[{"id":7,"name":"Feel","nb_album":100}]}""",
-            ["/search?"] = TrackSearchJson.Replace("Test Artist", "Feel"),
-            ["/artist/42/albums"] = ArtistAlbumsJson,
-            ["/artist/42"] = """{"id":42,"name":"Feel","picture_xl":"https://cdn/correct.jpg"}""",
-        }, uri => requested.Add(uri));
-        var song = Assert.Single(await svc.SearchSongsByArtistTitleAsync("Feel", "Test Track"));
-        var builder = new SubsonicResponseBuilder(_registry,
-            Microsoft.Extensions.Options.Options.Create(new Octo.Models.Settings.SubsonicSettings()));
-        if (enriched) await svc.EnrichExternalSongsAsync(new() { song });
-
-        var searchRow = builder.ConvertSongToJson(song);
-        var reloaded = await svc.GetSongAsync(SoulseekMetadataService.ProviderName, song.Id);
-        Assert.NotNull(reloaded);
-        var detailRow = builder.ConvertSongToJson(reloaded!);
-        Assert.Equal(searchRow["artistId"], detailRow["artistId"]);
-        Assert.Equal(searchRow["albumId"], detailRow["albumId"]);
-
-        var artistId = Assert.IsType<string>(detailRow["artistId"]);
-        var artist = await svc.GetArtistAsync(SoulseekMetadataService.ProviderName, artistId);
-        var albums = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, artistId);
-
-        Assert.Equal("Feel", artist!.Name);
-        Assert.Equal("https://cdn/correct.jpg", artist.ImageUrl);
-        Assert.Equal("42", _registry.Lookup(artistId)!.ExternalArtistId);
-        Assert.Equal(3, albums.Count);
-        Assert.DoesNotContain(requested, uri => uri.AbsolutePath == "/search/artist");
-        Assert.Contains(requested, uri => uri.AbsolutePath == "/artist/42/albums");
-        if (!enriched)
-            Assert.Contains(requested, uri => Uri.UnescapeDataString(uri.Query).Contains("track:\"Test Track\""));
-    }
-
-    [Fact]
-    public async Task UnenrichedSongAlbum_ResolvesUsingRecordingAndRetainsParentsOnReload()
-    {
-        var requested = new List<Uri>();
-        var svc = BuildService(new()
-        {
-            ["/search?"] = TrackSearchJson,
-            ["/album/99/tracks"] = AlbumTracksJson,
-            ["/album/99"] = AlbumDetailJson,
-        }, uri => requested.Add(uri));
-        var song = Assert.Single(await svc.SearchSongsByArtistTitleAsync("Test Artist", "Test Track"));
-        var parents = _registry.RegisterSongParents(song);
-
-        var album = await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, parents.AlbumId);
-
-        Assert.Equal(2, album!.Songs.Count);
-        Assert.Equal("42", _registry.Lookup(album.ArtistId!)!.ExternalArtistId);
-        Assert.DoesNotContain(requested, uri => uri.AbsolutePath == "/search/album");
-        var reloaded = await svc.GetSongAsync(SoulseekMetadataService.ProviderName, album.Songs[0].Id);
-        Assert.Equal("42", _registry.Lookup(reloaded!.ArtistId!)!.ExternalArtistId);
-        Assert.Equal("99", _registry.Lookup(reloaded.AlbumId!)!.ExternalAlbumId);
-    }
-
-    [Fact]
-    public async Task LegacyArtistWithAmbiguousName_DoesNotGuessProfileOrDiscography()
-    {
-        var requested = new List<Uri>();
-        var svc = BuildService(new()
-        {
-            ["/search/artist"] = """{"data":[{"id":7,"name":"Feel","nb_album":100},{"id":42,"name":"Feel","nb_album":3}]}""",
-            ["/search?"] = """{"data":[]}""",
-        }, uri => requested.Add(uri));
-        var id = _registry.Register(new SoulseekRouting { Kind = RoutingKind.Artist, Artist = "Feel" });
-
-        var artist = await svc.GetArtistAsync(SoulseekMetadataService.ProviderName, id);
-        var albums = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, id);
-
-        Assert.Equal("Feel", artist!.Name);
-        Assert.Null(artist.ImageUrl);
-        Assert.Null(_registry.Lookup(id)!.ExternalArtistId);
-        Assert.Empty(albums);
-        Assert.DoesNotContain(requested, uri => uri.AbsolutePath.StartsWith("/artist/"));
-    }
-
-    [Fact]
-    public async Task GetArtistAsync_UsesExactProviderIdInsteadOfRepeatingNameSearch()
-    {
-        const string exactArtist = @"{""id"":42,""name"":""Exact Artist"",
-            ""picture_xl"":""https://cdn/exact.jpg""}";
-        var requested = new List<string>();
-        var svc = BuildService(new()
-        {
-            ["/artist/42"] = exactArtist,
-            ["/search/artist"] = ArtistSearchJson,
-        }, uri => requested.Add(uri.AbsolutePath));
-        var searchHit = Assert.Single(await svc.SearchArtistsAsync("Test Artist", 1));
-
-        var artist = await svc.GetArtistAsync(SoulseekMetadataService.ProviderName, searchHit.Id);
-
-        Assert.NotNull(artist);
-        Assert.Equal("Exact Artist", artist!.Name);
-        Assert.Equal("https://cdn/exact.jpg", artist.ImageUrl);
-        Assert.Contains("/artist/42", requested);
-        Assert.Single(requested, path => path == "/search/artist");
-    }
 
     [Fact]
     public async Task SearchAlbumsAsync_ReturnsAlbumsWithRegistryIds()
@@ -342,72 +96,6 @@ public class SoulseekMetadataServiceTests
         Assert.NotNull(routing);
         Assert.Equal(RoutingKind.Album, routing!.Kind);
         Assert.Equal("1", routing.ExternalAlbumId);
-    }
-
-    [Fact]
-    public async Task ArtistDiscography_UsesRegistryIdsAndKeepsReleaseTypes()
-    {
-        var svc = BuildService(new()
-        {
-            ["/search/artist"] = ArtistSearchJson,
-            ["/artist/42/albums"] = ArtistAlbumsJson,
-        });
-
-        var artist = Assert.Single(await svc.SearchArtistsAsync("Test Artist", 5));
-        var artistRouting = _registry.Lookup(artist.Id);
-        Assert.NotNull(artistRouting);
-        Assert.Equal(RoutingKind.Artist, artistRouting!.Kind);
-        Assert.Equal("42", artistRouting.ExternalArtistId);
-        Assert.Equal(artist.Id, artist.ExternalId);
-        Assert.Equal(SoulseekMetadataService.ProviderName, artist.ExternalProvider);
-
-        var albums = await svc.GetArtistAlbumsAsync(
-            SoulseekMetadataService.ProviderName, artist.Id);
-
-        Assert.Equal(3, albums.Count);
-        Assert.Equal(new[] { "album", "ep", "single" },
-            albums.Select(a => a.ReleaseTypes.Single()));
-        Assert.Equal(new int?[] { 2020, 2021, 2022 }, albums.Select(a => a.Year));
-        Assert.All(albums, album =>
-        {
-            Assert.Equal(album.Id, album.ExternalId);
-            Assert.Equal(artist.Id, album.ArtistId);
-            var routing = _registry.Lookup(album.Id);
-            Assert.NotNull(routing);
-            Assert.Equal(RoutingKind.Album, routing!.Kind);
-            Assert.Equal("42", routing.ExternalArtistId);
-            Assert.False(string.IsNullOrWhiteSpace(routing.ExternalAlbumId));
-        });
-    }
-
-    [Fact]
-    public async Task ArtistDiscography_DuplicateTitlePrefersAlbumBeforeRegisteringIds()
-    {
-        const string duplicates = @"{""total"":2,""data"":[
-            {""id"":90,""title"":""Same Name"",""record_type"":""single"",""release_date"":""2024-01-01""},
-            {""id"":91,""title"":""Same Name"",""record_type"":""album"",""release_date"":""2020-01-01""}
-        ]}";
-        var svc = BuildService(new()
-        {
-            ["/search/artist"] = ArtistSearchJson,
-            ["/artist/42/albums"] = duplicates,
-        });
-        var artist = Assert.Single(await svc.SearchArtistsAsync("Test Artist", 5));
-
-        var album = Assert.Single(await svc.GetArtistAlbumsAsync(
-            SoulseekMetadataService.ProviderName, artist.Id));
-
-        Assert.Equal("album", Assert.Single(album.ReleaseTypes));
-        Assert.Equal("91", _registry.Lookup(album.Id)!.ExternalAlbumId);
-    }
-
-    [Fact]
-    public async Task ArtistDiscography_WrongProviderReturnsEmpty()
-    {
-        var svc = BuildService(new() { ["/search/artist"] = ArtistSearchJson });
-        var artist = Assert.Single(await svc.SearchArtistsAsync("Test Artist", 5));
-
-        Assert.Empty(await svc.GetArtistAlbumsAsync("deezer", artist.Id));
     }
 
     [Fact]
@@ -486,6 +174,88 @@ public class SoulseekMetadataServiceTests
     }
 
     [Fact]
+    public async Task GetAlbumAsync_DeezerKnowsTheAlbumButFailsToAnswer_ListsNoFiledSongs()
+    {
+        // A partial list during a Deezer outage would be cached as the whole album by a
+        // client that syncs, so the songs filed under it are only a stand-in when Deezer
+        // has no such album at all.
+        var svc = BuildService(new() { ["/search/album"] = AlbumSearchJson });
+        var albumId = (await svc.SearchAlbumsAsync("test", 10)).Single().Id;
+        _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Song, Artist = "Test Artist", Title = "Track One", Album = "Test Album", Duration = 200,
+        });
+
+        var album = await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, albumId);
+
+        Assert.NotNull(album);
+        Assert.Empty(album!.Songs);
+    }
+
+    private const string DeezerNoData =
+        @"{""error"":{""type"":""DataException"",""message"":""no data"",""code"":800}}";
+
+    private const string DeezerQuota =
+        @"{""error"":{""type"":""Exception"",""message"":""Quota limit exceeded"",""code"":4}}";
+
+    /// <summary>An album row opened with one song filed under it, the catalog answering the
+    /// album and its tracklist with these.</summary>
+    private async Task<Album> OpenAlbumWithAFiledSong(string albumJson, string tracksJson)
+    {
+        var svc = BuildService(new()
+        {
+            ["/search/album"] = AlbumSearchJson,
+            ["/album/1/tracks"] = tracksJson,
+            ["/album/1"] = albumJson,
+        });
+        var albumId = (await svc.SearchAlbumsAsync("test", 10)).Single().Id;
+        _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Song, Artist = "Test Artist", Title = "Track One", Album = "Test Album", Duration = 200,
+        });
+        return (await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, albumId))!;
+    }
+
+    [Fact]
+    public async Task GetAlbumAsync_DeezerHasNoSuchAlbum_ListsTheFiledSongs()
+    {
+        // Deezer answering that the album does not exist used to read the same as an outage,
+        // so the album opened empty though Octo had shown a song under it (#59).
+        var album = await OpenAlbumWithAFiledSong(DeezerNoData, AlbumTracksJson);
+
+        Assert.Equal(["Track One"], album.Songs.Select(s => s.Title));
+        Assert.Equal(1, album.SongCount);
+    }
+
+    [Fact]
+    public async Task GetAlbumAsync_DeezerListsNoTracksForTheAlbum_ListsTheFiledSongs()
+    {
+        var album = await OpenAlbumWithAFiledSong(AlbumDetailJson, @"{""data"":[]}");
+
+        Assert.Equal(["Track One"], album.Songs.Select(s => s.Title));
+    }
+
+    [Fact]
+    public async Task GetAlbumAsync_DeezerSaysTheAlbumHasNoTracks_ListsTheFiledSongs()
+    {
+        var album = await OpenAlbumWithAFiledSong(
+            @"{""id"":1,""title"":""Test Album"",""nb_tracks"":0,""artist"":{""name"":""Test Artist""}}",
+            @"{""total"":0,""data"":[]}");
+
+        Assert.Equal(["Track One"], album.Songs.Select(s => s.Title));
+        Assert.Equal("Test Album", album.Title);
+    }
+
+    [Fact]
+    public async Task GetAlbumAsync_TracklistThrottled_ListsNoFiledSongs()
+    {
+        // Deezer knows the album and only failed to answer: a partial list would stick.
+        var album = await OpenAlbumWithAFiledSong(AlbumDetailJson, DeezerQuota);
+
+        Assert.Empty(album.Songs);
+    }
+
+    [Fact]
     public async Task GetAlbumAsync_UnknownId_ReturnsNull()
     {
         var svc = BuildService(new());
@@ -500,5 +270,328 @@ public class SoulseekMetadataServiceTests
         var albumId = (await svc.SearchAlbumsAsync("test", 10)).Single().Id;
 
         Assert.Null(await svc.GetAlbumAsync("deezer", albumId));
+    }
+
+    /// <summary>The album a song row names for a song Deezer cannot place: the row's own
+    /// title, minted by the response builder exactly as getSong and search3 mint it.</summary>
+    private string AlbumIdFromSongRow(string songId, string artist, string title)
+    {
+        var builder = new SubsonicResponseBuilder(_registry, Options.Create(new SubsonicSettings()));
+        var row = builder.ConvertSongToJson(new Song
+        {
+            Id = songId, Artist = artist, Title = title, Album = "", Duration = 151, IsLocal = false,
+        });
+        return (string)row["parent"];
+    }
+
+    [Fact]
+    public async Task GetAlbumAsync_SongRowAlbumDeezerCannotName_ListsTheSongThatNamedIt()
+    {
+        // Issue #59: an upload Deezer does not know gets a single-style album named after
+        // itself. getAlbum answered it with no songs, and Tempo crashed opening the player.
+        var svc = BuildService(new());
+        var songId = _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Song, YouTubeId = "yt-raya", Artist = "Phonk", Title = "Zericxxn - Raya", Duration = 151,
+        });
+        var albumId = AlbumIdFromSongRow(songId, "Phonk", "Zericxxn - Raya");
+
+        var album = await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, albumId);
+
+        Assert.NotNull(album);
+        var song = Assert.Single(album!.Songs);
+        Assert.Equal(songId, song.Id);
+        Assert.Equal(albumId, song.AlbumId);
+        Assert.Equal(album.Title, song.Album);
+        Assert.Equal(1, album.SongCount);
+    }
+
+    [Fact]
+    public async Task GetAlbumAsync_SongRowAlbum_ListsEachRecordingOnceUnderItsNewestId()
+    {
+        // The same upload minted twice (a lookup found its video, so its id changed) is one song.
+        var svc = BuildService(new());
+        var older = _registry.Register(new SoulseekRouting
+            { Kind = RoutingKind.Song, Artist = "Phonk", Title = "Zericxxn - Raya", Duration = 180 });
+        var newer = _registry.Register(new SoulseekRouting
+            { Kind = RoutingKind.Song, YouTubeId = "yt-raya", Artist = "Phonk", Title = "Zericxxn - Raya", Duration = 151 });
+        _registry.Register(new SoulseekRouting
+            { Kind = RoutingKind.Song, Artist = "Someone Else", Title = "Zericxxn - Raya", Duration = 151 });
+        var albumId = AlbumIdFromSongRow(newer, "Phonk", "Zericxxn - Raya");
+
+        var album = await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, albumId);
+
+        var song = Assert.Single(album!.Songs);
+        Assert.Equal(newer, song.Id);
+        Assert.NotEqual(older, song.Id);
+    }
+
+    // ---- Which catalog artist an artist page lists ----------------------------------
+    // The page used to trust the first search hit, and two artists can share a name.
+
+    private string OutsideArtist(string name, string? deezerId = null) => _registry.Register(new SoulseekRouting
+    {
+        Kind = RoutingKind.Artist, Artist = name, ExternalArtistId = deezerId,
+    });
+
+    private static string Releases(params string[] titles) =>
+        @"{""data"":[" + string.Join(",", titles.Select((title, i) =>
+            $@"{{""id"":{900 + i},""title"":""{title}"",""record_type"":""album"",""release_date"":""200{i}-01-01"",""nb_tracks"":10}}")) + "]}";
+
+    [Fact]
+    public async Task GetArtistAlbums_SkipsABiggerActWhoseNameContainsThisOne()
+    {
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = @"{""data"":[
+                {""id"":111,""name"":""Test Artist Orchestra"",""nb_fan"":90000},
+                {""id"":222,""name"":""Test Artist"",""nb_fan"":10}]}",
+            ["/artist/111/albums"] = Releases("Wrong Record"),
+            ["/artist/222/albums"] = Releases("Right Record"),
+        });
+
+        var albums = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, OutsideArtist("Test Artist"));
+
+        Assert.Equal(["Right Record"], albums.Select(a => a.Title));
+    }
+
+    [Fact]
+    public async Task GetArtistAlbums_OfTwoArtistsOfOneName_TheMoreFollowedAndRemembersIt()
+    {
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = @"{""data"":[
+                {""id"":111,""name"":""Nirvana"",""nb_fan"":40},
+                {""id"":222,""name"":""Nirvana"",""nb_fan"":9000000}]}",
+            ["/artist/111/albums"] = Releases("Local Anaesthetic"),
+            ["/artist/222/albums"] = Releases("Nevermind"),
+        });
+        var id = OutsideArtist("Nirvana");
+
+        var albums = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, id);
+
+        Assert.Equal(["Nevermind"], albums.Select(a => a.Title));
+        // Kept on the artist, so the next visit asks for no name search.
+        Assert.Equal("222", _registry.Lookup(id)!.ExternalArtistId);
+    }
+
+    [Fact]
+    public async Task GetArtistAlbums_AnIdAlreadyKnown_WinsOverANameSearch()
+    {
+        // The artist the user tapped is the less followed one of the name.
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = @"{""data"":[
+                {""id"":222,""name"":""Nirvana"",""nb_fan"":9000000},
+                {""id"":111,""name"":""Nirvana"",""nb_fan"":40}]}",
+            ["/artist/111/albums"] = Releases("Local Anaesthetic"),
+            ["/artist/222/albums"] = Releases("Nevermind"),
+        });
+
+        var albums = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, OutsideArtist("Nirvana", "111"));
+
+        Assert.Equal(["Local Anaesthetic"], albums.Select(a => a.Title));
+    }
+
+    [Fact]
+    public async Task GetArtistAlbums_ALibraryArtist_IsTheOneSharingItsAlbums()
+    {
+        // The library holds the less followed Nirvana. Its albums say so, even over an id a
+        // search remembered for the name.
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = @"{""data"":[
+                {""id"":222,""name"":""Nirvana"",""nb_fan"":9000000},
+                {""id"":111,""name"":""Nirvana"",""nb_fan"":40}]}",
+            ["/artist/111/albums"] = Releases("Local Anaesthetic", "Dedicated to Markos III"),
+            ["/artist/222/albums"] = Releases("Nevermind", "In Utero"),
+        });
+        var id = OutsideArtist("Nirvana", "222");
+
+        var albums = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, id,
+            ["Local Anaesthetic"]);
+
+        Assert.Contains("Dedicated to Markos III", albums.Select(a => a.Title));
+        Assert.DoesNotContain("Nevermind", albums.Select(a => a.Title));
+        // The library page's choice is its own. The artist's routing is everyone's.
+        Assert.Equal("222", _registry.Lookup(id)!.ExternalArtistId);
+
+        // Kept for the page's next visit all the same: no name search this time.
+        var searches = _calls.Count(c => c.Contains("/search/artist"));
+        var again = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, id,
+            ["Local Anaesthetic"]);
+        Assert.Equal(albums.Select(a => a.Title), again.Select(a => a.Title));
+        Assert.Equal(searches, _calls.Count(c => c.Contains("/search/artist")));
+    }
+
+    [Fact]
+    public async Task GetArtistAlbums_ALibraryPagesNamesake_StaysOnThatPage()
+    {
+        // One listener's library holds the less followed Nirvana. Their library page picking
+        // that artist used to write it onto the name's shared routing, and every listener's
+        // outside page and search row for "Nirvana" then showed the library's artist.
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = @"{""data"":[
+                {""id"":222,""name"":""Nirvana"",""nb_fan"":9000000,""picture_xl"":""https://cdn/us.jpg""},
+                {""id"":111,""name"":""Nirvana"",""nb_fan"":40,""picture_xl"":""https://cdn/uk.jpg""}]}",
+            ["/artist/111/albums"] = Releases("Local Anaesthetic"),
+            ["/artist/222/albums"] = Releases("Nevermind"),
+        });
+        // The library page: a name search, then the albums with the library's titles.
+        var id = (await svc.SearchArtistsAsync("Nirvana", 5)).Single().Id;
+        var library = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, id, ["Local Anaesthetic"]);
+        Assert.Equal(["Local Anaesthetic"], library.Select(a => a.Title));
+
+        // Another listener's outside page for the name, and their search row.
+        var outside = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, id);
+        var row = (await svc.SearchArtistsAsync("Nirvana", 5)).Single();
+
+        Assert.Equal(["Nevermind"], outside.Select(a => a.Title));
+        Assert.Equal("https://cdn/us.jpg", row.ImageUrl);
+        Assert.Equal("222", _registry.Lookup(id)!.ExternalArtistId);
+    }
+
+    [Fact]
+    public async Task SearchAlbums_ALessFollowedNamesakesAlbum_DoesNotDecideTheName()
+    {
+        // Two artists share a name. An album row and the album it opens name the catalog
+        // artist who made it, and writing that onto the name's shared artist entry let the
+        // first search to show the obscure one's album decide "Nirvana" for every listener,
+        // across restarts.
+        var svc = BuildService(new()
+        {
+            ["/search/album"] = @"{""data"":[
+                {""id"":5,""title"":""Local Anaesthetic"",""record_type"":""album"",""nb_tracks"":1,
+                 ""artist"":{""id"":111,""name"":""Nirvana""}}]}",
+            ["/album/5/tracks"] = @"{""total"":1,""data"":[
+                {""title"":""Modus Vivendi"",""duration"":200,""track_position"":1,""disk_number"":1,""artist"":{""name"":""Nirvana""}}]}",
+            ["/album/5"] = @"{""id"":5,""title"":""Local Anaesthetic"",""release_date"":""1971-01-01"",
+                ""artist"":{""id"":111,""name"":""Nirvana""}}",
+            ["/search/artist"] = @"{""data"":[
+                {""id"":222,""name"":""Nirvana"",""nb_fan"":9000000,""picture_xl"":""https://cdn/us.jpg""},
+                {""id"":111,""name"":""Nirvana"",""nb_fan"":40,""picture_xl"":""https://cdn/uk.jpg""}]}",
+            ["/artist/111/albums"] = Releases("Local Anaesthetic"),
+            ["/artist/222/albums"] = Releases("Nevermind"),
+        });
+
+        var album = Assert.Single(await svc.SearchAlbumsAsync("local anaesthetic", 10));
+        await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, album.Id);
+
+        var row = (await svc.SearchArtistsAsync("Nirvana", 5)).Single();
+        var outside = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, album.ArtistId!);
+
+        Assert.Equal(album.ArtistId, row.Id);
+        Assert.Equal("https://cdn/us.jpg", row.ImageUrl);
+        Assert.Equal(["Nevermind"], outside.Select(a => a.Title));
+        Assert.Equal("222", _registry.Lookup(album.ArtistId!)!.ExternalArtistId);
+    }
+
+    [Fact]
+    public async Task SearchAlbums_AnArtistAlreadySettled_KeepsItsChoice()
+    {
+        var svc = BuildService(new()
+        {
+            ["/search/album"] = @"{""data"":[
+                {""id"":5,""title"":""Local Anaesthetic"",""record_type"":""album"",""nb_tracks"":6,
+                 ""artist"":{""id"":111,""name"":""Nirvana""}}]}",
+        });
+        var id = OutsideArtist("Nirvana", "222");
+
+        var album = Assert.Single(await svc.SearchAlbumsAsync("local anaesthetic", 10));
+
+        Assert.Equal(id, album.ArtistId);
+        Assert.Equal("222", _registry.Lookup(id)!.ExternalArtistId);
+    }
+
+    [Fact]
+    public async Task ArtistPage_OpenedWithTwoRequestsAtOnce_WalksTheCatalogOnce()
+    {
+        // Feishin opens an artist page with the artist and its album list at the same moment,
+        // and a second client may open it too. Each request walked the catalog on its own:
+        // 44 calls for one page, against a limit of 30 every 5 seconds.
+        var titles = Enumerable.Range(0, 30).Select(i => $"Record {i}").ToArray();
+        var catalogAnswers = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = @"{""data"":[{""id"":222,""name"":""Busy"",""nb_fan"":9}]}",
+            ["/artist/222/albums"] = @"{""data"":[" + string.Join(",", titles.Select((t, i) =>
+                $@"{{""id"":{1000 + i},""title"":""{t}"",""record_type"":""album"",""release_date"":""2001-01-01""}}")) + "]}",
+            ["/album/1"] = @"{""nb_tracks"":10}",
+        }, catalogAnswers.Task);
+        var id = OutsideArtist("Busy");
+
+        var pages = new[]
+        {
+            svc.GetArtistAsync(SoulseekMetadataService.ProviderName, id).ContinueWith(_ =>
+                svc.GetArtistAlbumsKnownCountsAsync(SoulseekMetadataService.ProviderName, id)).Unwrap(),
+            svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, id),
+            svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, id),
+        };
+        // All three are asking before the catalog answers any of them.
+        catalogAnswers.SetResult();
+        var lists = await Task.WhenAll(pages);
+
+        // One walk: the name search, the artist's listing, and the own records of the first
+        // 20 albums without a count. 22 calls, where each request used to make its own.
+        Assert.Equal(1, _calls.Count(c => c.Contains("/search/artist")));
+        Assert.Equal(1, _calls.Count(c => c.Contains("/artist/222/albums")));
+        Assert.Equal(20, _calls.Count(c => c.Contains("/album/1")));
+        Assert.Equal(22, _calls.Count);
+        Assert.All(lists, list => Assert.Equal(30, list.Count));
+        // Both page lists show the counts that came back, and each has albums of its own.
+        Assert.Equal(20, lists[1].Count(a => a.SongCount == 10));
+        Assert.NotSame(lists[1][0], lists[2][0]);
+    }
+
+    [Fact]
+    public async Task SearchArtists_TwoArtistsOfOneName_AreOneRowForTheMoreFollowed()
+    {
+        // They would get one id, and two rows opening one page only confuse.
+        var svc = BuildService(new()
+        {
+            ["/search/artist"] = @"{""data"":[
+                {""id"":111,""name"":""Nirvana"",""nb_fan"":40,""picture_xl"":""https://cdn/uk.jpg""},
+                {""id"":222,""name"":""Nirvana"",""nb_fan"":9000000,""picture_xl"":""https://cdn/us.jpg""},
+                {""id"":333,""name"":""Nirvana Tribute"",""nb_fan"":5}]}",
+        });
+
+        var artists = await svc.SearchArtistsAsync("nirvana", 10);
+
+        Assert.Equal(["Nirvana", "Nirvana Tribute"], artists.Select(a => a.Name));
+        Assert.Equal("https://cdn/us.jpg", artists[0].ImageUrl);
+        Assert.Equal("222", _registry.Lookup(artists[0].Id)!.ExternalArtistId);
+    }
+
+    [Fact]
+    public async Task OutsideAlbums_SayWhatKindOfReleaseTheyAre()
+    {
+        var svc = BuildService(new()
+        {
+            ["/search/album"] = AlbumSearchJson,
+            ["/album/1/tracks"] = AlbumTracksJson,
+            // The album's own record calls it an EP, and opening it says so.
+            ["/album/1"] = AlbumDetailJson.Replace(@"""id"":1,", @"""id"":1,""record_type"":""ep"","),
+            ["/search/artist"] = @"{""data"":[{""id"":444,""name"":""Test Artist""}]}",
+            ["/artist/444/albums"] = @"{""data"":[
+                {""id"":5,""title"":""A Single"",""record_type"":""single"",""release_date"":""2020-01-01"",""nb_tracks"":1},
+                {""id"":6,""title"":""Odd One"",""record_type"":""mixtape"",""release_date"":""2019-01-01"",""nb_tracks"":9},
+                {""id"":7,""title"":""Best Of"",""record_type"":""compile"",""release_date"":""2018-01-01"",""nb_tracks"":20}]}",
+        });
+
+        var found = Assert.Single(await svc.SearchAlbumsAsync("test", 10));
+        Assert.Equal(["album"], found.ReleaseTypes);
+
+        var opened = await svc.GetAlbumAsync(SoulseekMetadataService.ProviderName, found.Id);
+        Assert.Equal(["ep"], opened!.ReleaseTypes);
+
+        var page = await svc.GetArtistAlbumsAsync(SoulseekMetadataService.ProviderName, OutsideArtist("Test Artist"));
+        Assert.Equal(["single"], page.Single(a => a.Title == "A Single").ReleaseTypes);
+        // The catalog's "compile", as MusicBrainz and so Navidrome file one: an album that is
+        // a compilation. Still listed after the singles.
+        Assert.Equal(["album", "compilation"], page.Single(a => a.Title == "Best Of").ReleaseTypes);
+        Assert.Equal(["A Single", "Best Of", "Odd One"], page.Select(a => a.Title));
+        // A type OpenSubsonic has no name for is left unsaid rather than guessed.
+        Assert.Empty(page.Single(a => a.Title == "Odd One").ReleaseTypes);
     }
 }

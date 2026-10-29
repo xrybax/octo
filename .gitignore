@@ -55,6 +55,8 @@ nunit-*.xml
 
 # Fichiers et dossiers à ignorer pour un projet .NET
 bin/
+# Cargo binaries (crates/*/src/bin) are source, not .NET output.
+!crates/*/src/bin/
 obj/
 *.user
 *.suo
@@ -69,6 +71,8 @@ obj/
 *.log
 
 /.env
+# A server's own compose additions, so the folder stays a clean clone the update helper can move.
+/docker-compose.override.yml
 
 # Downloaded music files
 octo/downloads/
@@ -79,6 +83,7 @@ octo/downloads/
 # Local runtime state
 octo-config/
 slskd-state/
+navidrome-data/
 # The compose default for DOWNLOAD_PATH, so a default install creates it here.
 /downloads/
 
@@ -86,3 +91,19 @@ slskd-state/
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Rust build output. Each worktree keeps its own target/; never share one CARGO_TARGET_DIR.
+/target/
+
+# GeoNames' files for the image build, when downloaded beforehand (docker.yml does).
+/places-data/
+
+# The parity harness and its runs stay local.
+parity/
+
+# Markdown notes, plans and reports stay local. Published: the READMEs, the Family
+# guide the README links to and the icon attribution.
+*.md
+!README.md
+!docs/family.md
+!scripts/admin-icons/SOURCES.md
