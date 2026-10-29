@@ -88,6 +88,15 @@ impl CoverArtAggregator {
 }
 
 fn make_cache_key(r: &SoulseekRouting) -> String {
+    match r.kind {
+        RoutingKind::Artist if r.external_artist_id.is_some() => {
+            return format!("Artist|deezer:{}", r.external_artist_id.as_deref().unwrap_or(""));
+        }
+        RoutingKind::Album if r.external_album_id.is_some() => {
+            return format!("Album|deezer:{}", r.external_album_id.as_deref().unwrap_or(""));
+        }
+        _ => {}
+    }
     let artist = dotnet::to_lower_invariant(r.artist.as_deref().unwrap_or("").trim());
     let album_or_title = if r.kind == RoutingKind::Album {
         r.album.as_deref().or(r.title.as_deref())
@@ -173,4 +182,16 @@ mod tests {
         aggregator.get_cover(&routing, false).await;
         assert_eq!(miss.asked.load(Ordering::SeqCst), 2);
     }
+}
+
+#[cfg(test)]
+#[test]
+fn artist_cover_cache_keeps_namesakes_apart() {
+    let artist = |id: &str| SoulseekRouting {
+        kind: RoutingKind::Artist,
+        artist: Some("Feel".into()),
+        external_artist_id: Some(id.into()),
+        ..Default::default()
+    };
+    assert_ne!(make_cache_key(&artist("111")), make_cache_key(&artist("222")));
 }

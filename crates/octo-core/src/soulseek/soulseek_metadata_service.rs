@@ -36,9 +36,8 @@ pub struct SoulseekRouting {
     /// routings minted from a song row, which fall back to a name lookup.
     pub external_album_id: Option<String>,
 
-    /// Deezer artist id behind an artist routing, once an artist search or an artist
-    /// page settled on one. The id itself is minted from the name alone, and two artists can
-    /// share a name, so this is what says which of them the page lists. Not part of the id.
+    /// Deezer artist id carried from a catalog artist, song or album. Artist ids use
+    /// this identity when known, keeping namesakes on separate pages.
     pub external_artist_id: Option<String>,
 
     /// Position within its album. Carried so a track downloaded as part of an

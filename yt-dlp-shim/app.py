@@ -72,7 +72,7 @@ _DOWNLOAD_ROOT = os.path.realpath(os.environ.get("DOWNLOAD_ROOT", "/music"))
 # muxed 360p mp4) is being phased out by YouTube and 502s on a growing share.
 _AUDIO_FORMAT = os.environ.get(
     "YTDLP_AUDIO_FORMAT",
-    "140/bestaudio[ext=m4a]/bestaudio[ext=webm]/bestaudio",
+    "140/bestaudio[ext=m4a]",
 )
 
 # The YouTube player client asked for stream URLs. yt-dlp's own clients hand out URLs that
@@ -1315,10 +1315,10 @@ def stream():
 
 @app.get("/download")
 def download():
-    """Download a YouTube video as a tagged MP3 to <dest>.mp3.
+    """Download native AAC audio as a tagged M4A to <dest>.m4a.
 
     GET /download?id=<videoId>&dest=<path_no_ext>[&artist=<a>&title=<t>]
-    Returns {"path": "<dest>.mp3"} on success.
+    Returns {"path": "<dest>.m4a"} on success.
     """
     video_id = request.args.get("id", "").strip()
     dest = request.args.get("dest", "").strip()
@@ -1334,20 +1334,18 @@ def download():
     os.makedirs(os.path.dirname(full_dest) or ".", exist_ok=True)
 
     ytdlp_args = [
-        "-x",
-        "-f", "141/140/bestaudio[ext=m4a]/bestaudio",
-        "--audio-format", "mp3",
-        "--audio-quality", "0",
+        # Audio-only AAC: preserve the source instead of transcoding it to MP3.
+        "-f", "141/140/bestaudio[ext=m4a]",
         "--embed-metadata",
         "--embed-thumbnail",
         "--convert-thumbnails", "jpg",
         "-o", f"{full_dest}.%(ext)s",
         f"https://www.youtube.com/watch?v={video_id}",
     ]
-    path = f"{full_dest}.mp3"
+    path = f"{full_dest}.m4a"
 
     def _sweep_partials() -> None:
-        for ext in (".jpg", ".webp", ".png", ".mp3"):
+        for ext in (".jpg", ".webp", ".png", ".m4a"):
             leftover = full_dest + ext
             if os.path.exists(leftover):
                 try:
@@ -1380,9 +1378,9 @@ def download():
     # Overwrite yt-dlp's video-derived title/artist with the clean values Octo
     # passed, so Navidrome groups the track correctly. Codec-copy keeps the audio
     # and the embedded cover; list args are quoting-safe for spaces. Best-effort:
-    # on failure we keep the original mp3.
+    # on failure we keep the original m4a.
     if artist or title:
-        tagged = f"{full_dest}.tagged.mp3"
+        tagged = f"{full_dest}.tagged.m4a"
         meta = []
         if artist:
             meta += ["-metadata", f"artist={artist}", "-metadata", f"album_artist={artist}"]

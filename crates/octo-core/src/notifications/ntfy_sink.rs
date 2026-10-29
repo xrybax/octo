@@ -145,13 +145,13 @@ mod tests {
         let body = build_body(&NotificationMessage::new(
             NotificationEventType::LosslessFallback,
             "Lossless miss: A \u{2013} B",
-            "Soulseek failed (nothing usable); settling for YouTube MP3.",
+            "Soulseek failed (nothing usable); settling for YouTube M4A.",
             None,
         ));
 
         assert_eq!(
             body,
-            "Soulseek failed (nothing usable); settling for YouTube MP3."
+            "Soulseek failed (nothing usable); settling for YouTube M4A."
         );
     }
 

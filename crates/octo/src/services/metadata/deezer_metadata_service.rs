@@ -288,6 +288,7 @@ impl DeezerMetadataService {
             if let Some((t, doc)) = found {
                 let (mut alb_title, mut cover, mut art_name, mut art_img) = (None, None, None, None);
                 let mut alb_id = 0;
+                let mut artist_id = None;
                 if let Some(alb) = try_get_property(&t, "album")? {
                     alb_title = str_prop(alb, "title")?;
                     cover = deezer_image(alb, &["cover_xl", "cover_medium"])?;
@@ -297,6 +298,7 @@ impl DeezerMetadataService {
                 }
                 if let Some(art) = try_get_property(&t, "artist")? {
                     art_name = str_prop(art, "name")?;
+                    artist_id = catalog_id(art)?;
                     art_img = deezer_image(art, &["picture_xl", "picture_medium"])?;
                 }
                 let duration = match try_get_property(&t, "duration")? {
@@ -313,6 +315,7 @@ impl DeezerMetadataService {
                     year_unresolved = year_transient;
                 }
                 meta = Some(TrackMeta {
+                    artist_id,
                     album_id: (alb_id > 0).then_some(alb_id),
                     album_title: alb_title.map(str::to_string),
                     album_cover_url: cover.map(str::to_string),
@@ -651,6 +654,31 @@ impl DeezerMetadataService {
             .await
     }
 
+    /// Read the selected artist, without guessing another artist from their name.
+    pub async fn artist_by_id(&self, id: &str) -> Option<ArtistHit> {
+        if id.is_empty() {
+            return None;
+        }
+        let key = format!("artist-id|{id}");
+        if let Some(Cached::ArtistHits(hits)) = self.get_cached(&key) {
+            return hits.into_iter().next();
+        }
+        let response = self
+            .get_json(
+                &format!("{}/artist/{}", self.base(), escape_data_string(id)),
+                false,
+            )
+            .await;
+        if response.transient {
+            return None;
+        }
+        let doc = response.doc?;
+        let hits = artist_hits(Some(&serde_json::json!({"data": [doc]}))).ok()?;
+        let hit = hits.into_iter().find(|hit| hit.deezer_id == id)?;
+        self.put(key, Cached::ArtistHits(vec![hit.clone()]), POSITIVE_TTL);
+        Some(hit)
+    }
+
     async fn fetch_artist_search(
         &self,
         query: &str,
@@ -673,10 +701,38 @@ impl DeezerMetadataService {
                 return anyhow::Ok(Flow::Return(()));
             }
             hits = artist_hits(r.doc.as_ref())?;
+            // Artist search can omit a namesake entirely. Songs expose that artist's real
+            // catalog id, so exact-name song hits supplement, never replace, artist hits.
+            let tracks = self
+                .get_json(&format!("{}/search?q={q}&limit=50", self.base()), background)
+                .await;
+            if tracks.transient {
+                return Ok(Flow::Return(()));
+            }
+            if let Some(Value::Array(data)) = tracks.doc.as_ref().and_then(|doc| doc.get("data")) {
+                let artists: Vec<Value> = data
+                    .iter()
+                    .filter_map(|track| track.get("artist"))
+                    .filter(|artist| {
+                        artist
+                            .get("name")
+                            .and_then(Value::as_str)
+                            .is_some_and(|name| SongIdentity::same_artist_name(name, query))
+                    })
+                    .cloned()
+                    .collect();
+                for artist in artist_hits(Some(&serde_json::json!({"data": artists})))? {
+                    if !hits.iter().any(|hit| hit.deezer_id == artist.deezer_id) {
+                        hits.push(artist);
+                    }
+                }
+            }
+            hits.sort_by_key(|hit| !SongIdentity::same_artist_name(&hit.name, query));
+            hits.truncate(limit as usize);
             Ok(Flow::Done)
         };
         match attempt.await {
-            Ok(Flow::Return(())) => return Vec::new(),
+            Ok(Flow::Return(())) => return hits,
             Ok(Flow::Done) => {}
             Err(e) => debug!("deezer artist search '{query}' failed: {e}"),
         }
@@ -785,6 +841,10 @@ impl DeezerMetadataService {
                         deezer_id: id,
                         title: title.to_string(),
                         artist: artist.unwrap_or("").to_string(),
+                        artist_id: try_get_property(a, "artist")?
+                            .map(catalog_id)
+                            .transpose()?
+                            .flatten(),
                         cover_url: deezer_image(a, &["cover_xl", "cover_medium"])?.map(str::to_string),
                         year: None,
                         track_count,
@@ -922,6 +982,7 @@ impl DeezerMetadataService {
                         deezer_id: album_id,
                         title: title.to_string(),
                         artist: artist_name.to_string(),
+                        artist_id: Some(deezer_artist_id.to_string()),
                         cover_url: deezer_image(a, &["cover_xl", "cover_medium"])?.map(str::to_string),
                         year,
                         track_count: int(a, "nb_tracks")?.unwrap_or(0),
@@ -1178,6 +1239,7 @@ impl DeezerMetadataService {
                 String::new(),
             );
             let mut record_type = None;
+            let mut artist_id = None;
             let mut album_explicit = None;
             let mut year = None;
             // Kept from the album call: this is what tells an empty tracklist apart from an
@@ -1212,6 +1274,7 @@ impl DeezerMetadataService {
                     }
                     if let Some(art) = try_get_property(root, "artist")? {
                         artist = str_prop(art, "name")?.unwrap_or("").to_string();
+                        artist_id = catalog_id(art)?;
                     }
                     if let Some(name) = first_genre(root)? {
                         genre = name;
@@ -1252,6 +1315,16 @@ impl DeezerMetadataService {
                         tracks.push(AlbumTrack {
                             title: t_title.to_string(),
                             artist: t_artist.map_or_else(|| artist.clone(), str::to_string),
+                            artist_id: try_get_property(t, "artist")?
+                                .map(catalog_id)
+                                .transpose()?
+                                .flatten()
+                                .or_else(|| {
+                                    t_artist
+                                        .is_none_or(|name| SongIdentity::same_artist_name(name, &artist))
+                                        .then(|| artist_id.clone())
+                                        .flatten()
+                                }),
                             duration: int(t, "duration")?,
                             track_position: int(t, "track_position")?,
                             disc_number: int(t, "disk_number")?,
@@ -1309,6 +1382,7 @@ impl DeezerMetadataService {
             });
 
             detail = Some(AlbumDetail {
+                artist_id,
                 deezer_id: deezer_id.to_string(),
                 title,
                 artist,
@@ -1640,6 +1714,10 @@ impl DeezerMetadataService {
                 let key = Self::track_key(artist, title);
                 if self.get_cached(&key).is_none() {
                     let meta = TrackMeta {
+                        artist_id: try_get_property(hit, "artist")?
+                            .map(catalog_id)
+                            .transpose()?
+                            .flatten(),
                         album_id: (alb_id > 0).then_some(alb_id),
                         album_title: alb_title.map(str::to_string),
                         album_cover_url: cover.map(str::to_string),
@@ -1898,7 +1976,10 @@ fn edition_key(hit: &AlbumHit) -> String {
     };
     format!(
         "{}|{}|{}",
-        SongIdentity::key(&hit.artist),
+        hit.artist_id
+            .as_ref()
+            .map(|id| format!("deezer:{id}"))
+            .unwrap_or_else(|| SongIdentity::key(&hit.artist)),
         normalized_record_type(hit.record_type.as_deref()).unwrap_or_default(),
         title_key
     )
@@ -2133,6 +2214,13 @@ fn named_artist_id(doc: Option<&Value>, artist: &str) -> ElementResult<Option<St
 /// `root.data` when it is an array. Reading a property of a root that is not an object
 /// fails.
 /// The artists of a catalog list (`data`), each with an id and a name.
+fn catalog_id(artist: &Value) -> ElementResult<Option<String>> {
+    Ok(match try_get_property(artist, "id")? {
+        Some(id @ Value::Number(_)) => Some(get_int64(id)?.to_string()),
+        _ => None,
+    })
+}
+
 fn artist_hits(doc: Option<&Value>) -> ElementResult<Vec<ArtistHit>> {
     let mut hits = Vec::new();
     if let Some(data) = data_array(doc)? {

@@ -74,10 +74,10 @@ pub enum DownloadSource {
     #[default]
     Soulseek,
 
-    /// Lossy MP3 via the yt-dlp shim.
+    /// Native AAC/M4A via the yt-dlp shim.
     YouTube,
 
-    /// Try Soulseek FLAC first; fall back to YouTube MP3 if it fails.
+    /// Try Soulseek FLAC first; fall back to YouTube M4A if it fails.
     SoulseekThenYouTube,
 
     /// Submit external track/album hearts to an existing Lidarr instance. Lidarr is
@@ -376,8 +376,8 @@ pub struct SubsonicSettings {
 
     /// Download source (default: Soulseek). Lidarr applies to hearts only.
     /// Environment variable: DOWNLOAD_SOURCE
-    /// Values: "Soulseek" (FLAC), "YouTube" (MP3), "SoulseekThenYouTube"
-    /// (FLAC with MP3 fallback), or "Lidarr" (heart-only, full album).
+    /// Values: "Soulseek" (FLAC), "YouTube" (AAC/M4A), "SoulseekThenYouTube"
+    /// (FLAC with M4A fallback), or "Lidarr" (heart-only, full album).
     pub download_source: DownloadSource,
 
     /// Ordered sources for explicit track and album hearts. Empty keeps older

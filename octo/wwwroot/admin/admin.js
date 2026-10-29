@@ -1021,7 +1021,7 @@ document.querySelectorAll('form[data-section]').forEach(form => {
 // sources visible so disabling one never destroys the user's chosen order.
 const heartSourceMeta = {
   Soulseek: { title: 'Soulseek', detail: 'Lossless FLAC from slskd peers', mark: 'b-slskd' },
-  YouTube: { title: 'YouTube', detail: 'Lossy MP3 from the yt-dlp shim', mark: 'b-youtube' },
+  YouTube: { title: 'YouTube', detail: 'Native AAC/M4A from the yt-dlp shim', mark: 'b-youtube' },
   Lidarr: { title: 'Lidarr', detail: 'Album automation through your Lidarr server', mark: 'b-lidarr' },
 };
 let heartSourceSteps = [];

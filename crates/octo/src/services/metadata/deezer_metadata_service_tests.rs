@@ -1047,6 +1047,7 @@ async fn get_artist_albums_on_more_pages_keeps_every_edition() {
 #[test]
 fn fold_editions_keeps_a_clean_copy_beside_its_explicit_record_when_asked() {
     let hit = |id: &str, title: &str, tracks: i32, explicit: Option<bool>| AlbumHit {
+        artist_id: None,
         deezer_id: id.into(),
         title: title.into(),
         artist: "Drake".into(),
@@ -1416,4 +1417,31 @@ fn a_hit_of_a_far_length_is_another_recording_when_both_lengths_are_known() {
     assert_eq!(ids(Some(338)), [2, 3]);
     assert_eq!(ids(None), [1, 2, 3]);
     assert_eq!(ids(Some(0)), [1, 2, 3]);
+}
+
+#[tokio::test]
+async fn artist_search_supplements_exact_names_from_songs_and_keeps_their_ids() {
+    let h = Harness::new(vec![
+        ("/search/artist", r#"{"data":[{"id":111,"name":"Feel"},{"id":999,"name":"Feeling Good"}]}"#),
+        ("/search?", r#"{"data":[{"artist":{"id":222,"name":"Feel","picture_xl":"https://cdn/polish.jpg"}},{"artist":{"id":222,"name":"Feel"}},{"artist":{"id":333,"name":"Other"}}]}"#),
+    ]).await;
+    let hits = h.service.search_artists("feel", 10).await;
+    assert_eq!(
+        hits.iter().map(|h| h.deezer_id.as_str()).collect::<Vec<_>>(),
+        ["111", "222", "999"]
+    );
+    assert_eq!(hits[1].picture_url.as_deref(), Some("https://cdn/polish.jpg"));
+    assert_eq!(h.service.search_artists("feel", 10).await, hits);
+    assert_eq!(h.calls("/search?"), 1);
+}
+
+#[tokio::test]
+async fn track_metadata_carries_the_artist_catalog_id() {
+    let h = Harness::new(vec![("/search?", r#"{"data":[{"id":123,"title":"A gdy jest już ciemno","duration":200,"artist":{"id":222,"name":"Feel"},"album":{"id":1001,"title":"Feel"}}]}"#)]).await;
+    let meta = h
+        .service
+        .enrich_track("Feel", "A gdy jest już ciemno", false, false)
+        .await
+        .unwrap();
+    assert_eq!(meta.artist_id.as_deref(), Some("222"));
 }

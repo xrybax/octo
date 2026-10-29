@@ -80,6 +80,18 @@ impl DeezerCoverArtLookup {
                 }
             }
             RoutingKind::Album => self.resolve_album_cover(artist, album, background).await?,
+            RoutingKind::Artist if routing.external_artist_id.is_some() => {
+                let id = routing.external_artist_id.as_deref().unwrap_or("");
+                let url = format!("{}/artist/{}", self.base, dotnet::escape_data_string(id));
+                match self.get_json(&url, background).await? {
+                    Some(doc) => deezer_image(&doc, &["picture_xl", "picture_big", "picture_medium"])?
+                        .map(str::to_string),
+                    None => None,
+                }
+            }
+            // The song establishes which namesake this is. Wait for that identification
+            // rather than assigning another artist's photograph through a name search.
+            RoutingKind::Artist if routing.title.is_some() => None,
             RoutingKind::Artist => self.resolve_artist_cover(artist, background).await?,
             RoutingKind::Song => {
                 let title = routing.title.as_deref().unwrap_or("").trim();

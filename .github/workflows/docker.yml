@@ -27,7 +27,7 @@ on:
     # Dated releases (2026.07.29) as well as any future v-prefixed ones. Without the
     # second pattern a dated tag pushes silently and never builds an image.
     tags: ['v*', '[0-9][0-9][0-9][0-9].*']
-    branches: [main]
+    branches: [main, feat/rust-m4a-artist-identity]
   # No pull_request trigger. A merge already arrives here as a push to main, so
   # building on `closed` too meant every merge built the same commit twice.
 

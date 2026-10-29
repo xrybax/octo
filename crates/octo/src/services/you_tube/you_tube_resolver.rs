@@ -423,7 +423,7 @@ impl YouTubeResolver {
         })
     }
 
-    /// Downloads a YouTube video as MP3 to `{dest_without_ext}.mp3` via the shim's
+    /// Downloads native AAC/M4A to `{dest_without_ext}.m4a` via the shim's
     /// /download endpoint, passing clean artist/title so the file is tagged for
     /// the library. Returns the saved path, or None on failure. Uses the
     /// no-timeout stream client because a download can take a while.

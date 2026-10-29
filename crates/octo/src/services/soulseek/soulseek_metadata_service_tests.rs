@@ -557,7 +557,7 @@ async fn get_artist_albums_a_library_pages_namesake_stays_on_that_page() {
     .await;
     // The library page: a name search, then the albums with the library's titles.
     let rows = h.service.search_artists("Nirvana", 5).await;
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     let id = rows[0].id.clone();
     let library = h
         .service
@@ -568,7 +568,7 @@ async fn get_artist_albums_a_library_pages_namesake_stays_on_that_page() {
     // Another listener's outside page for the name, and their search row.
     let outside = h.service.get_artist_albums(PROVIDER, &id).await;
     let rows = h.service.search_artists("Nirvana", 5).await;
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
 
     assert_eq!(album_titles(&outside), ["Nevermind"]);
     assert_eq!(rows[0].image_url.as_deref(), Some("https://cdn/us.jpg"));
@@ -577,10 +577,8 @@ async fn get_artist_albums_a_library_pages_namesake_stays_on_that_page() {
 
 #[tokio::test]
 async fn search_albums_a_less_followed_namesakes_album_does_not_decide_the_name() {
-    // Two artists share a name. An album row and the album it opens name the catalog
-    // artist who made it, and writing that onto the name's shared artist entry let the
-    // first search to show the obscure one's album decide "Nirvana" for every listener,
-    // across restarts.
+    // An album opens the artist who made it, while the other namesake remains
+    // available on its own search row and page.
     let (uk, us) = (releases(&["Local Anaesthetic"]), releases(&["Nevermind"]));
     let h = build_service(vec![
         (
@@ -611,14 +609,15 @@ async fn search_albums_a_less_followed_namesakes_album_does_not_decide_the_name(
     h.service.get_album(PROVIDER, &album.id).await;
 
     let rows = h.service.search_artists("Nirvana", 5).await;
-    assert_eq!(rows.len(), 1);
+    assert_eq!(rows.len(), 2);
     let artist_id = album.artist_id.clone().expect("an artist id");
     let outside = h.service.get_artist_albums(PROVIDER, &artist_id).await;
 
-    assert_eq!(rows[0].id, artist_id);
+    assert_ne!(rows[0].id, artist_id);
+    assert_eq!(rows[1].id, artist_id);
     assert_eq!(rows[0].image_url.as_deref(), Some("https://cdn/us.jpg"));
-    assert_eq!(album_titles(&outside), ["Nevermind"]);
-    assert_eq!(h.lookup(&artist_id).external_artist_id.as_deref(), Some("222"));
+    assert_eq!(album_titles(&outside), ["Local Anaesthetic"]);
+    assert_eq!(h.lookup(&artist_id).external_artist_id.as_deref(), Some("111"));
 }
 
 #[tokio::test]
@@ -635,7 +634,13 @@ async fn search_albums_an_artist_already_settled_keeps_its_choice() {
     let albums = h.service.search_albums("local anaesthetic", 10).await;
 
     assert_eq!(albums.len(), 1);
-    assert_eq!(albums[0].artist_id.as_deref(), Some(id.as_str()));
+    assert_ne!(albums[0].artist_id.as_deref(), Some(id.as_str()));
+    assert_eq!(
+        h.lookup(albums[0].artist_id.as_deref().unwrap())
+            .external_artist_id
+            .as_deref(),
+        Some("111")
+    );
     assert_eq!(h.lookup(&id).external_artist_id.as_deref(), Some("222"));
 }
 
@@ -691,8 +696,8 @@ async fn artist_page_opened_with_two_requests_at_once_walks_the_catalog_once() {
 }
 
 #[tokio::test]
-async fn search_artists_two_artists_of_one_name_are_one_row_for_the_more_followed() {
-    // They would get one id, and two rows opening one page only confuse.
+async fn search_artists_namesakes_keep_separate_pages_and_photographs() {
+    // Popularity must not erase the less followed namesake.
     let h = build_service(vec![(
         "/search/artist",
         r#"{"data":[
@@ -705,11 +710,13 @@ async fn search_artists_two_artists_of_one_name_are_one_row_for_the_more_followe
     let artists = h.service.search_artists("nirvana", 10).await;
 
     let names: Vec<&str> = artists.iter().map(|a| a.name.as_str()).collect();
-    assert_eq!(names, ["Nirvana", "Nirvana Tribute"]);
-    assert_eq!(artists[0].image_url.as_deref(), Some("https://cdn/us.jpg"));
+    assert_eq!(names, ["Nirvana", "Nirvana", "Nirvana Tribute"]);
+    assert_ne!(artists[0].id, artists[1].id);
+    assert_eq!(artists[0].image_url.as_deref(), Some("https://cdn/uk.jpg"));
+    assert_eq!(artists[1].image_url.as_deref(), Some("https://cdn/us.jpg"));
     assert_eq!(
         h.lookup(&artists[0].id).external_artist_id.as_deref(),
-        Some("222")
+        Some("111")
     );
 }
 
@@ -2086,4 +2093,72 @@ async fn the_catalog_track_search_answers_its_rows_lookups() {
     h.service.enrich_search_rows(&mut songs).await;
     assert_eq!(songs[0].album, "25");
     assert_eq!(h.calls("/search?"), 1);
+}
+
+#[tokio::test]
+async fn feel_from_song_search_opens_its_own_artist_and_discography() {
+    let h = build_service(vec![
+        ("/search/artist", r#"{"data":[{"id":111,"name":"Feel","nb_fan":999999,"picture_xl":"https://cdn/namesake.jpg"}]}"#),
+        ("/search?", r#"{"data":[{"title":"A gdy jest już ciemno","artist":{"id":222,"name":"Feel","picture_xl":"https://cdn/polish.jpg"}}]}"#),
+        ("/artist/222/albums", r#"{"data":[{"id":1001,"title":"Feel The Best Of","record_type":"album","nb_tracks":12}]}"#),
+        ("/artist/222", r#"{"id":222,"name":"Feel","nb_album":4,"picture_xl":"https://cdn/polish.jpg"}"#),
+        ("/artist/111/albums", r#"{"data":[{"id":1002,"title":"Namesake Album","record_type":"album","nb_tracks":8}]}"#),
+        ("/artist/111", r#"{"id":111,"name":"Feel","picture_xl":"https://cdn/namesake.jpg"}"#),
+    ]).await;
+    let artists = h.service.search_artists("feel", 20).await;
+    assert_eq!(artists.len(), 2);
+    let polish = artists
+        .iter()
+        .find(|a| h.lookup(&a.id).external_artist_id.as_deref() == Some("222"))
+        .unwrap();
+    let song_id = h.registry.register(SoulseekRouting {
+        kind: RoutingKind::Song,
+        artist: Some("Feel".into()),
+        title: Some("A gdy jest już ciemno".into()),
+        external_artist_id: Some("222".into()),
+        ..Default::default()
+    });
+    let song = h.service.get_song(PROVIDER, &song_id).await.unwrap();
+    assert_eq!(song.artist_id.as_deref(), Some(polish.id.as_str()));
+    let page = h.service.get_artist(PROVIDER, &polish.id).await.unwrap();
+    assert_eq!(page.image_url.as_deref(), Some("https://cdn/polish.jpg"));
+    let albums = h.service.get_artist_albums(PROVIDER, &polish.id).await;
+    assert_eq!(albums.len(), 1);
+    assert_eq!(albums[0].title, "Feel The Best Of");
+    assert_eq!(h.lookup(&albums[0].id).external_artist_id.as_deref(), Some("222"));
+    assert_eq!(h.calls("/artist/111"), 0);
+    // Once the catalog id is known, opening the page does not search the name again.
+    assert_eq!(h.calls("/search/artist"), 1);
+}
+
+#[tokio::test]
+async fn unavailable_selected_artist_never_becomes_a_namesake() {
+    let h = build_service(vec![(
+        "/search/artist",
+        r#"{"data":[{"id":111,"name":"Feel","picture_xl":"https://cdn/wrong.jpg"}]}"#,
+    )])
+    .await;
+    let id = outside_artist(&h, "Feel", Some("222"));
+    let artist = h.service.get_artist(PROVIDER, &id).await.unwrap();
+    assert_eq!(artist.name, "Feel");
+    assert_eq!(artist.image_url, None);
+    assert_eq!(h.calls("/search/artist"), 0);
+}
+
+#[tokio::test]
+async fn album_tracks_keep_each_catalog_artist_including_guests() {
+    let h = build_service(vec![
+        ("/search/album", r#"{"data":[{"id":1001,"title":"Feel The Best Of","nb_tracks":2,"artist":{"id":222,"name":"Feel"}}]}"#),
+        ("/album/1001/tracks", r#"{"total":2,"data":[{"title":"First","artist":{"id":222,"name":"Feel"}},{"title":"Guest Song","artist":{"id":333,"name":"Guest"}}]}"#),
+        ("/album/1001", r#"{"id":1001,"title":"Feel The Best Of","artist":{"id":222,"name":"Feel"}}"#),
+    ]).await;
+    let hits = h.service.search_albums("Feel", 10).await;
+    let album = h.service.get_album(PROVIDER, &hits[0].id).await.unwrap();
+    assert_eq!(album.artist_id, hits[0].artist_id);
+    assert_eq!(album.songs[0].artist_id, album.artist_id);
+    assert_ne!(album.songs[1].artist_id, album.artist_id);
+    let guest_id = album.songs[1].artist_id.as_deref().unwrap();
+    assert_eq!(h.lookup(guest_id).external_artist_id.as_deref(), Some("333"));
+    let reloaded = h.service.get_song(PROVIDER, &album.songs[1].id).await.unwrap();
+    assert_eq!(reloaded.artist_id, album.songs[1].artist_id);
 }

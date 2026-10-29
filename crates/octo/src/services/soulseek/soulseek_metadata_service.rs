@@ -450,6 +450,7 @@ impl Inner {
                 artist: Some(hit.artist.clone()),
                 album: Some(hit.title.clone()),
                 external_album_id: Some(hit.deezer_id.clone()),
+                external_artist_id: hit.artist_id.clone(),
                 explicit_content: words,
                 version: explicit_status::version_of(words),
                 ..Default::default()
@@ -457,6 +458,7 @@ impl Inner {
             let artist_id = self.id_registry.register(SoulseekRouting {
                 kind: RoutingKind::Artist,
                 artist: Some(hit.artist.clone()),
+                external_artist_id: hit.artist_id.clone(),
                 ..Default::default()
             });
 
@@ -489,6 +491,16 @@ impl Inner {
     /// track it matched can sit on a compilation, and the album the song already names is the
     /// one it came from.
     fn apply_track_meta(&self, song: &mut Song, meta: &TrackMeta) {
+        if song.artist_id.is_none()
+            && let Some(id) = &meta.artist_id
+        {
+            song.artist_id = Some(self.id_registry.register(SoulseekRouting {
+                kind: RoutingKind::Artist,
+                artist: meta.artist_name.clone().or_else(|| Some(song.artist.clone())),
+                external_artist_id: Some(id.clone()),
+                ..Default::default()
+            }));
+        }
         if let Some(d) = meta.duration.filter(|&d| d > 0) {
             song.duration = Some(d);
         }
@@ -506,6 +518,9 @@ impl Inner {
         // Reflect onto the shared routing so getSong stays consistent.
         if let Some(routing) = self.lookup(id) {
             let mut r = routing.lock();
+            if r.external_artist_id.is_none() && meta.artist_id.is_some() {
+                r.external_artist_id = meta.artist_id.clone();
+            }
             if let Some(d) = meta.duration.filter(|&d| d > 0) {
                 r.duration = Some(d);
             }
@@ -840,7 +855,15 @@ impl Inner {
         } else {
             None
         };
-        let known_id = picked.or_else(|| routing.lock().external_artist_id.clone());
+        let snapshot = routing.snapshot();
+        let mut known_id = picked.or_else(|| snapshot.external_artist_id.clone());
+        if known_id.is_none() && snapshot.title.is_some() {
+            known_id = self.find_catalog_artist(&snapshot).await.map(|hit| hit.deezer_id);
+            // A song-anchored page must not switch to a more popular namesake on a miss.
+            if known_id.is_none() && !library_page {
+                return Vec::new();
+            }
+        }
 
         let mut known_releases: Option<Vec<AlbumHit>> = None;
         if let Some(known) = known_id.filter(|k| !k.is_empty()) {
@@ -912,7 +935,14 @@ impl Inner {
     /// Octo already settled on, else the one more people follow. None when none has the name.
     /// The search is the one the album listing makes, so it costs nothing more.
     async fn find_catalog_artist(&self, routing: &SoulseekRouting) -> Option<ArtistHit> {
+        if let Some(id) = non_empty(routing.external_artist_id.as_deref()) {
+            return self.deezer.artist_by_id(id).await;
+        }
         let name = non_empty(routing.artist.as_deref())?;
+        if let Some(title) = non_empty(routing.title.as_deref()) {
+            let meta = self.deezer.enrich_track(name, title, false, false).await?;
+            return self.deezer.artist_by_id(meta.artist_id.as_deref()?).await;
+        }
         let candidates = same_name(self.deezer.search_artists(name, ARTIST_CANDIDATES).await, name);
         candidates
             .iter()
@@ -967,6 +997,7 @@ impl Inner {
                     artist: Some(name.to_string()),
                     album: Some(release.title.clone()),
                     external_album_id: Some(release.deezer_id.clone()),
+                    external_artist_id: release.artist_id.clone(),
                     explicit_content: words,
                     ..Default::default()
                 });
@@ -1645,57 +1676,24 @@ impl IMusicMetadataService for SoulseekMetadataService {
         let inner = &self.inner;
         let hits = inner.deezer.search_artists(query, limit).await;
 
-        // Two catalog artists of one name get one id, so they are one row: two rows opening
-        // the same page would only confuse. The row is the artist Octo already settled on for
-        // that name, else the one more people follow. (GroupBy keeps first-appearance order.)
-        let mut groups: Vec<(String, Vec<ArtistHit>)> = Vec::new();
+        // Namesakes are separate catalog entities. Their ids must stay separate all the
+        // way from this row through songs, albums, photographs and the artist page.
+        let mut artists = Vec::with_capacity(hits.len());
+        let mut seen = HashSet::new();
         for hit in hits {
-            match groups.iter_mut().find(|(name, _)| *name == hit.name) {
-                Some((_, group)) => group.push(hit),
-                None => groups.push((hit.name.clone(), vec![hit])),
+            if !seen.insert(hit.deezer_id.clone()) {
+                continue;
             }
-        }
-
-        let mut artists = Vec::with_capacity(groups.len());
-        for (name, same) in groups {
-            // Same registry id an album row mints for its artist, because the seed is the
-            // artist name alone. So an artist found here and the same artist reached from
-            // an album are one entity, and getArtist answers for both.
             let id = inner.id_registry.register(SoulseekRouting {
                 kind: RoutingKind::Artist,
-                artist: Some(name),
+                artist: Some(hit.name.clone()),
+                external_artist_id: Some(hit.deezer_id.clone()),
                 ..Default::default()
             });
-            let routing = inner.lookup(&id);
-            let settled = routing.as_ref().and_then(|r| r.lock().external_artist_id.clone());
-            let hit = same
-                .iter()
-                .find(|h| settled.as_deref() == Some(h.deezer_id.as_str()))
-                .or_else(|| most_followed(&same))
-                .expect("a group is never empty")
-                .clone();
-            // Remembered only when nothing is yet: an earlier search or visit to the artist's
-            // page already settled which artist of the name this is. An album never settles
-            // it: the name's entry is everyone's, and the first album to show a little-known
-            // namesake would have decided the name for all of them.
-            if let Some(routing) = routing {
-                let unsettled = {
-                    let mut r = routing.lock();
-                    let unsettled = r.external_artist_id.is_none();
-                    if unsettled {
-                        r.external_artist_id = Some(hit.deezer_id.clone());
-                    }
-                    unsettled
-                };
-                if unsettled {
-                    inner.id_registry.register(routing);
-                }
-            }
-
             artists.push(Artist {
                 id: id.clone(),
-                name: hit.name.clone(),
-                image_url: hit.picture_url.clone(),
+                name: hit.name,
+                image_url: hit.picture_url,
                 album_count: Some(hit.album_count),
                 is_local: false,
                 external_provider: Some(Self::PROVIDER_NAME.to_string()),
@@ -1735,6 +1733,19 @@ impl IMusicMetadataService for SoulseekMetadataService {
             id: external_id.to_string(),
             title: routing.title.clone().unwrap_or_default(),
             artist: routing.artist.clone().unwrap_or_default(),
+            artist_id: Some(
+                self.inner.id_registry.register(SoulseekRouting {
+                    kind: RoutingKind::Artist,
+                    artist: routing.artist.clone(),
+                    external_artist_id: routing.external_artist_id.clone(),
+                    title: routing
+                        .external_artist_id
+                        .is_none()
+                        .then(|| routing.title.clone())
+                        .flatten(),
+                    ..Default::default()
+                }),
+            ),
             // Carried from the routing so an album download tags the album the user
             // actually hearted rather than whatever Deezer guesses from artist+title,
             // and keeps its position so the album stays in order.
@@ -1767,9 +1778,10 @@ impl IMusicMetadataService for SoulseekMetadataService {
         // Enrich by the track title (the placeholder "album" is the song title) so
         // Deezer returns the REAL album (e.g. "Creep" -> "Pablo Honey"). Degrades
         // to the placeholder name if Deezer misses or is unreachable.
-        let artist_id = inner.id_registry.register(SoulseekRouting {
+        let mut artist_id = inner.id_registry.register(SoulseekRouting {
             kind: RoutingKind::Artist,
             artist: routing.artist.clone(),
+            external_artist_id: routing.external_artist_id.clone(),
             ..Default::default()
         });
         let artist = routing.artist.as_deref().unwrap_or("");
@@ -1791,7 +1803,10 @@ impl IMusicMetadataService for SoulseekMetadataService {
                 .as_ref()
                 .and_then(|m| m.album_title.clone())
                 .unwrap_or_else(|| placeholder.clone());
-            deezer_album_id = inner.deezer.find_album_id(artist, &album_name).await;
+            deezer_album_id = meta.as_ref().and_then(|m| m.album_id).map(|id| id.to_string());
+            if deezer_album_id.is_none() {
+                deezer_album_id = inner.deezer.find_album_id(artist, &album_name).await;
+            }
         }
 
         let mut album = Album {
@@ -1859,6 +1874,15 @@ impl IMusicMetadataService for SoulseekMetadataService {
         if !dotnet::is_blank(&detail.artist) {
             album.artist = detail.artist.clone();
         }
+        if detail.artist_id.is_some() {
+            artist_id = inner.id_registry.register(SoulseekRouting {
+                kind: RoutingKind::Artist,
+                artist: Some(detail.artist.clone()),
+                external_artist_id: detail.artist_id.clone(),
+                ..Default::default()
+            });
+            album.artist_id = Some(artist_id.clone());
+        }
         // Deezer says the album has no tracks at all: the songs filed under it stand in.
         if detail.tracks.is_empty() {
             inner.list_songs_filed_under(&mut album, &routing, &placeholder, &artist_id);
@@ -1874,6 +1898,8 @@ impl IMusicMetadataService for SoulseekMetadataService {
                 artist: Some(track.artist.clone()),
                 title: Some(track.title.clone()),
                 album: Some(detail.title.clone()),
+                external_artist_id: track.artist_id.clone(),
+                external_album_id: Some(detail.deezer_id.clone()),
                 duration: track.duration,
                 track: track.track_position,
                 disc_number: track.disc_number,
@@ -1889,7 +1915,13 @@ impl IMusicMetadataService for SoulseekMetadataService {
                 id: track_id.clone(),
                 title: track.title.clone(),
                 artist: track.artist.clone(),
-                artist_id: Some(artist_id.clone()),
+                artist_id: Some(inner.id_registry.register(SoulseekRouting {
+                    kind: RoutingKind::Artist,
+                    artist: Some(track.artist.clone()),
+                    external_artist_id: track.artist_id.clone(),
+                    title: track.artist_id.is_none().then(|| track.title.clone()),
+                    ..Default::default()
+                })),
                 album: detail.title.clone(),
                 album_id: Some(external_id.to_string()),
                 duration: track.duration,
@@ -1924,14 +1956,20 @@ impl IMusicMetadataService for SoulseekMetadataService {
         // settles it: the id already held, else the one of this exact name more people
         // follow. The first search hit can be a bigger act whose name contains this one.
         let hit = inner.find_catalog_artist(&routing).await;
+        if let Some(hit) = &hit
+            && let Some(shared) = inner.lookup(external_id)
+        {
+            shared.lock().external_artist_id = Some(hit.deezer_id.clone());
+            inner.id_registry.register(shared);
+        }
         let meta = match hit {
-            None => {
+            None if routing.external_artist_id.is_none() && routing.title.is_none() => {
                 inner
                     .deezer
                     .enrich_artist(routing.artist.as_deref().unwrap_or(""))
                     .await
             }
-            Some(_) => None,
+            _ => None,
         };
         Some(Artist {
             id: external_id.to_string(),
@@ -1977,21 +2015,9 @@ impl IMusicMetadataService for SoulseekMetadataService {
             let id = inner.id_registry.register(SoulseekRouting {
                 kind: RoutingKind::Artist,
                 artist: Some(other.name.clone()),
+                external_artist_id: Some(other.deezer_id.clone()),
                 ..Default::default()
             });
-            if let Some(shared) = inner.lookup(&id) {
-                let unsettled = {
-                    let mut r = shared.lock();
-                    let unsettled = r.external_artist_id.is_none();
-                    if unsettled {
-                        r.external_artist_id = Some(other.deezer_id.clone());
-                    }
-                    unsettled
-                };
-                if unsettled {
-                    inner.id_registry.register(shared);
-                }
-            }
             related.push(Artist {
                 id: id.clone(),
                 name: other.name,

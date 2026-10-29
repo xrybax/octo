@@ -555,3 +555,71 @@ fn a_re_pin_and_a_size_are_written_down_and_outlive_a_restart() {
     );
     assert_eq!(again.stream_facts(&id), None);
 }
+
+#[test]
+fn catalog_artists_with_the_same_name_have_separate_stable_ids() {
+    let registry = ExternalIdRegistry::in_memory();
+    let artist = |id: &str, name: &str| SoulseekRouting {
+        kind: RoutingKind::Artist,
+        artist: Some(name.into()),
+        external_artist_id: Some(id.into()),
+        ..Default::default()
+    };
+    let polish = registry.register(artist("222", "Feel"));
+    let namesake = registry.register(artist("111", "Feel"));
+    assert_ne!(polish, namesake);
+    assert_eq!(polish, registry.register(artist("222", "FEEL")));
+    assert_eq!(
+        registry
+            .lookup(&namesake)
+            .unwrap()
+            .snapshot()
+            .external_artist_id
+            .as_deref(),
+        Some("111")
+    );
+}
+
+#[test]
+fn song_anchors_keep_unresolved_namesakes_apart() {
+    let registry = ExternalIdRegistry::in_memory();
+    let artist = |title: &str| SoulseekRouting {
+        kind: RoutingKind::Artist,
+        artist: Some("Feel".into()),
+        title: Some(title.into()),
+        ..Default::default()
+    };
+    assert_ne!(
+        registry.register(artist("A gdy jest już ciemno")),
+        registry.register(artist("Another song"))
+    );
+}
+
+#[test]
+fn persisted_artist_ids_from_before_catalog_scoping_still_open() {
+    let (_dir, path) = temp_path("legacy-artists.json");
+    let legacy_id = ExternalIdRegistry::make_short_id(&SoulseekRouting {
+        kind: RoutingKind::Artist,
+        artist: Some("Feel".into()),
+        ..Default::default()
+    });
+    std::fs::write(
+        &path,
+        serde_json::json!([{
+            "Id": legacy_id,
+            "Routing": {"Kind":"Artist", "Artist":"Feel", "ExternalArtistId":"222"}
+        }])
+        .to_string(),
+    )
+    .unwrap();
+    let registry = ExternalIdRegistry::new(Some(&path));
+    assert_eq!(
+        registry
+            .lookup(&legacy_id)
+            .unwrap()
+            .snapshot()
+            .external_artist_id
+            .as_deref(),
+        Some("222")
+    );
+}

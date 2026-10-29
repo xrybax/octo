@@ -461,6 +461,18 @@ impl ExternalIdRegistry {
         const CLEAN_WORD: &str = "clean";
         let text = |s: &Option<String>| s.clone().unwrap_or_default();
         let seed = match r.kind {
+            RoutingKind::Artist if r.external_artist_id.as_deref().is_some_and(|id| !id.is_empty()) => {
+                format!("k:artist|deezer:{}", text(&r.external_artist_id))
+            }
+            RoutingKind::Album
+                if r.external_album_id.as_deref().is_some_and(|id| !id.is_empty())
+                    && r.external_artist_id.as_deref().is_some_and(|id| !id.is_empty()) =>
+            {
+                format!("k:album|deezer:{}", text(&r.external_album_id))
+            }
+            RoutingKind::Artist if r.title.as_deref().is_some_and(|title| !title.is_empty()) => {
+                format!("k:artist|a:{}|t:{}", text(&r.artist), text(&r.title))
+            }
             RoutingKind::Album => format!("k:album|a:{}|al:{}", text(&r.artist), text(&r.album)),
             RoutingKind::Artist => format!("k:artist|a:{}", text(&r.artist)),
             RoutingKind::Song => format!(

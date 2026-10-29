@@ -862,6 +862,7 @@ impl SubsonicResponseBuilder {
             self.id_registry.register(SoulseekRouting {
                 kind: RoutingKind::Artist,
                 artist: Some(song.artist.clone()),
+                title: (!song.is_local).then(|| song.title.clone()),
                 ..Default::default()
             })
         });

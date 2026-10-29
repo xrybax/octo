@@ -785,7 +785,7 @@ impl ICoverArtSource for ITunesCoverArtLookup {
                 self.search_song_fallback(artist, album).await
             }
             RoutingKind::Artist => {
-                if artist.is_empty() {
+                if artist.is_empty() || routing.external_artist_id.is_some() || routing.title.is_some() {
                     return None;
                 }
                 let hit = self.search_and_score(artist, "musicArtist", artist, None).await?;

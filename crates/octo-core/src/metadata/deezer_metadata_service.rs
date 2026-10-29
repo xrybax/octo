@@ -7,6 +7,8 @@ use crate::common::dotnet;
 /// What a track search tells about one song.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TrackMeta {
+    /// The catalog artist, kept apart from other artists with the same name.
+    pub artist_id: Option<String>,
     /// The catalog id of the album the track was found on, when it said.
     pub album_id: Option<i64>,
     pub album_title: Option<String>,
@@ -77,6 +79,8 @@ pub struct CatalogCandidates {
 /// the detail call fills it.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AlbumHit {
+    /// The catalog artist, kept apart from other artists with the same name.
+    pub artist_id: Option<String>,
     pub deezer_id: String,
     pub title: String,
     pub artist: String,
@@ -96,6 +100,8 @@ pub struct AlbumHit {
 /// score, which picks an album's best songs for New Releases.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AlbumTrack {
+    /// The catalog artist, kept apart from other artists with the same name.
+    pub artist_id: Option<String>,
     pub title: String,
     pub artist: String,
     pub duration: Option<i32>,
@@ -111,6 +117,8 @@ pub struct AlbumTrack {
 /// album, ep, single or compile.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct AlbumDetail {
+    /// The catalog artist, kept apart from other artists with the same name.
+    pub artist_id: Option<String>,
     pub deezer_id: String,
     pub title: String,
     pub artist: String,

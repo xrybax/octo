@@ -205,7 +205,7 @@ pub fn render(evt: &NotificationEvent) -> NotificationMessage {
             r#type: evt.r#type,
             title: format!("Lossless miss: {track}"),
             body: format!(
-                "Soulseek failed ({}); settling for YouTube MP3.",
+                "Soulseek failed ({}); settling for YouTube M4A.",
                 evt.detail.as_deref().unwrap_or("no usable result")
             ),
             image_url: evt.cover_art_url.clone(),

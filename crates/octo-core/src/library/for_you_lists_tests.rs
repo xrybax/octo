@@ -256,6 +256,7 @@ fn deep_cuts_are_played_at_most_once_from_the_top_artists_and_not_in_rediscover(
 
 fn release(id: &str, kind: &str, date: Option<&str>) -> AlbumHit {
     AlbumHit {
+        artist_id: None,
         deezer_id: id.into(),
         title: "Title".into(),
         artist: "Artist".into(),
@@ -294,6 +295,7 @@ fn recent_releases_are_the_last_weeks_newest_first_no_compilations_no_future_no_
 
 fn track(position: i32, rank: Option<i32>) -> AlbumTrack {
     AlbumTrack {
+        artist_id: None,
         title: format!("Track {position}"),
         artist: "Artist".into(),
         duration: Some(200),

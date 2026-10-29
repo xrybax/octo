@@ -403,3 +403,39 @@ async fn the_albums_own_release_by_its_artist_is_taken() {
 
     assert_eq!(&bytes[..], b"/cdn/mixtape.jpg");
 }
+
+#[tokio::test]
+async fn an_artist_photograph_is_fetched_by_catalog_id_without_a_namesake_search() {
+    let (server, lookup) = catalog(|cdn| {
+        HashMap::from([
+            (
+                "/artist/222",
+                format!(r#"{{"id":222,"name":"Feel","picture_xl":"{cdn}/feel-poland.jpg"}}"#),
+            ),
+            (
+                "/search/artist",
+                format!(r#"{{"data":[{{"id":111,"name":"Feel","picture_xl":"{cdn}/wrong.jpg"}}]}}"#),
+            ),
+        ])
+    })
+    .await;
+    let bytes = lookup
+        .try_fetch(
+            &SoulseekRouting {
+                kind: RoutingKind::Artist,
+                artist: Some("Feel".into()),
+                external_artist_id: Some("222".into()),
+                ..Default::default()
+            },
+            false,
+        )
+        .await
+        .unwrap();
+    assert_eq!(&bytes[..], b"/cdn/feel-poland.jpg");
+    assert!(
+        !asked(&server)
+            .await
+            .iter()
+            .any(|r| r.url.path().starts_with("/search"))
+    );
+}

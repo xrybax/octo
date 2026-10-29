@@ -461,7 +461,7 @@ impl SoulseekDownloadService {
     // YouTube
     // =========================================================================
 
-    // Lossy MP3 via the yt-dlp shim's /download. The shim writes <dest>.mp3 into the staging
+    // Native AAC/M4A via the yt-dlp shim's /download. The shim writes <dest>.m4a into the staging
     // folder with clean tags and a cover; the base's placement moves it once the tags are settled.
     async fn download_via_you_tube(
         &self,
@@ -513,7 +513,7 @@ impl SoulseekDownloadService {
             &track_key,
             acquisition_event_kinds::FOUND,
             "Found it on YouTube",
-            Some(&format!("Video {video_id}, saved as an MP3")),
+            Some(&format!("Video {video_id}, saved as AAC/M4A")),
         );
 
         if !download.suppress_notify && announce_start {
@@ -522,7 +522,7 @@ impl SoulseekDownloadService {
                 title: r.title.clone(),
                 album: r.album.clone(),
                 source: Some("YouTube".into()),
-                format: Some("MP3".into()),
+                format: Some("M4A".into()),
                 duration_seconds: r.duration,
                 ..NotificationEvent::new(NotificationEventType::DownloadStarted)
             });
@@ -530,7 +530,7 @@ impl SoulseekDownloadService {
 
         // Staged, not written into the library. Writing straight to the layout path let the shim
         // overwrite a different file that happened to share the name before anything could
-        // protect it. Extension left empty: the shim appends .mp3 itself.
+        // protect it. Extension left empty: the shim appends .m4a itself.
         let incoming = combine(&download_path, INCOMING_FOLDER_NAME);
         sweep_incoming(&incoming);
         let dest_without_ext = combine(&incoming, &format!("{video_id}-{}", new_guid()));
@@ -551,11 +551,11 @@ impl SoulseekDownloadService {
         .await?;
         let Some(path) = path.filter(|p| !p.is_empty() && file_exists(p)) else {
             return Err(file_not_found(format!(
-                "YouTube MP3 download failed for '{artist} - {title}'"
+                "YouTube M4A download failed for '{artist} - {title}'"
             )));
         };
 
-        info!("YouTube MP3 download complete: {path}");
+        info!("YouTube M4A download complete: {path}");
 
         // Identification only. YouTube has no second candidate to fall back to, so a
         // disagreement is something to ask a person about (the Review playlist), never a reason
@@ -2466,14 +2466,14 @@ impl DownloadBackend for SoulseekDownloadService {
                 {
                     Ok(path) => Ok(path),
                     Err(e) if !cancellation_token.is_cancelled() => {
-                        warn!("Lossless download failed ({e}); falling back to YouTube MP3");
+                        warn!("Lossless download failed ({e}); falling back to YouTube M4A");
                         if !download.suppress_notify {
                             base.notifications().notify(NotificationEvent {
                                 artist: snapshot.artist.clone(),
                                 title: snapshot.title.clone(),
                                 album: snapshot.album.clone(),
                                 source: Some("YouTube".into()),
-                                format: Some("MP3".into()),
+                                format: Some("M4A".into()),
                                 detail: Some(e.to_string()),
                                 ..NotificationEvent::new(NotificationEventType::LosslessFallback)
                             });
