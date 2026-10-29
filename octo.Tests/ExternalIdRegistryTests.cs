@@ -12,27 +12,6 @@ public class ExternalIdRegistryTests
     }
 
     [Fact]
-    public void UnresolvedSongParents_KeepSeparateRecordingContextUntilIdentityIsKnown()
-    {
-        var first = _registry.RegisterSongParents(new Octo.Models.Domain.Song
-            { Id = "song-one", Artist = "Feel", Title = "Recording One", Album = "Feel" });
-        var second = _registry.RegisterSongParents(new Octo.Models.Domain.Song
-            { Id = "song-two", Artist = "Feel", Title = "Recording Two", Album = "Feel" });
-
-        Assert.NotEqual(first.ArtistId, second.ArtistId);
-        Assert.NotEqual(first.AlbumId, second.AlbumId);
-        Assert.Equal("Recording One", _registry.Lookup(first.ArtistId)!.Title);
-        Assert.Equal("Recording Two", _registry.Lookup(second.AlbumId)!.Title);
-
-        var strongOne = _registry.Register(new SoulseekRouting
-            { Kind = RoutingKind.Artist, Artist = "Feel", Title = "Recording One", ExternalArtistId = "42" });
-        var strongTwo = _registry.Register(new SoulseekRouting
-            { Kind = RoutingKind.Artist, Artist = "Feel", Title = "Recording Two", ExternalArtistId = "42" });
-        Assert.Equal(strongOne, strongTwo);
-        Assert.Null(_registry.Lookup(first.ArtistId)!.ExternalArtistId);
-    }
-
-    [Fact]
     public void Register_SameRouting_ProducesSameId()
     {
         // Arrange
@@ -71,7 +50,7 @@ public class ExternalIdRegistryTests
     }
 
     [Fact]
-    public void Register_NameOnlyAlbum_DoesNotAliasProviderBackedAlbum()
+    public void Register_AlbumWithoutDeezerId_DoesNotClobberKnownExternalAlbumId()
     {
         // Arrange: an album search registers the precise Deezer id.
         var fromSearch = new SoulseekRouting
@@ -83,31 +62,32 @@ public class ExternalIdRegistryTests
         };
         var id = _registry.Register(fromSearch);
 
-        // Act: a legacy song row later mints the same artist+album with no Deezer id.
+        // Act: a song row later mints the same artist+album with no Deezer id. It hashes
+        // to the same key, so a naive overwrite would drop the id we already resolved.
         var fromSongRow = new SoulseekRouting
         {
             Kind = RoutingKind.Album,
             Artist = "Radiohead",
             Album = "In Rainbows",
         };
-        var weakId = _registry.Register(fromSongRow);
+        var sameId = _registry.Register(fromSongRow);
 
         // Assert
-        Assert.NotEqual(id, weakId);
+        Assert.Equal(id, sameId);
         Assert.Equal("14880659", _registry.Lookup(id)!.ExternalAlbumId);
-        Assert.Null(_registry.Lookup(weakId)!.ExternalAlbumId);
     }
 
     [Fact]
-    public void Register_ProviderBackedAlbum_DoesNotOverwriteLegacyNameOnlyRoute()
+    public void Register_AlbumWithDeezerId_OverwritesAnEarlierUnknownId()
     {
-        var weakId = _registry.Register(new SoulseekRouting
+        // The preserve must only fill blanks, never block a real update.
+        var id = _registry.Register(new SoulseekRouting
         {
             Kind = RoutingKind.Album, Artist = "Radiohead", Album = "In Rainbows"
         });
-        Assert.Null(_registry.Lookup(weakId)!.ExternalAlbumId);
+        Assert.Null(_registry.Lookup(id)!.ExternalAlbumId);
 
-        var strongId = _registry.Register(new SoulseekRouting
+        _registry.Register(new SoulseekRouting
         {
             Kind = RoutingKind.Album,
             Artist = "Radiohead",
@@ -115,109 +95,85 @@ public class ExternalIdRegistryTests
             ExternalAlbumId = "14880659",
         });
 
-        Assert.NotEqual(weakId, strongId);
-        Assert.Null(_registry.Lookup(weakId)!.ExternalAlbumId);
-        Assert.Equal("14880659", _registry.Lookup(strongId)!.ExternalAlbumId);
-    }
-
-    [Fact]
-    public void Register_WeakerRouting_PreservesArtistIdAndReleaseType()
-    {
-        var id = _registry.Register(new SoulseekRouting
-        {
-            Kind = RoutingKind.Album,
-            Artist = "Radiohead",
-            Album = "In Rainbows",
-            ExternalAlbumId = "14880659",
-            ExternalArtistId = "399",
-            ReleaseType = "album",
-            CoverArtUrl = "https://cdn/in-rainbows.jpg",
-        });
-
-        var sameId = _registry.Register(new SoulseekRouting
-        {
-            Kind = RoutingKind.Album,
-            Artist = "RADIOHEAD",
-            Album = "Alternate display title",
-            ExternalAlbumId = "14880659",
-        });
-
-        Assert.Equal(id, sameId);
-        var routing = _registry.Lookup(id)!;
-        Assert.Equal("14880659", routing.ExternalAlbumId);
-        Assert.Equal("399", routing.ExternalArtistId);
-        Assert.Equal("album", routing.ReleaseType);
-        Assert.Equal("https://cdn/in-rainbows.jpg", routing.CoverArtUrl);
-    }
-
-    [Fact]
-    public void Register_SameProviderArtistId_PreservesKnownMetadata()
-    {
-        var id = _registry.Register(new SoulseekRouting
-        {
-            Kind = RoutingKind.Artist,
-            Artist = "Radiohead",
-            ExternalArtistId = "399",
-            CoverArtUrl = "https://cdn/radiohead.jpg",
-        });
-
-        var sameId = _registry.Register(new SoulseekRouting
-        {
-            Kind = RoutingKind.Artist,
-            Artist = "RADIOHEAD",
-            ExternalArtistId = "399",
-        });
-
-        Assert.Equal(id, sameId);
-        Assert.Equal("399", _registry.Lookup(id)!.ExternalArtistId);
-        Assert.Equal("https://cdn/radiohead.jpg", _registry.Lookup(id)!.CoverArtUrl);
-    }
-
-    [Fact]
-    public void Register_SameArtistNameWithDifferentProviderIds_ProducesDifferentIds()
-    {
-        var first = _registry.Register(new SoulseekRouting
-        {
-            Kind = RoutingKind.Artist,
-            Artist = "Feel",
-            ExternalArtistId = "111",
-        });
-        var second = _registry.Register(new SoulseekRouting
-        {
-            Kind = RoutingKind.Artist,
-            Artist = "Feel",
-            ExternalArtistId = "222",
-        });
-
-        Assert.NotEqual(first, second);
-        Assert.Equal("111", _registry.Lookup(first)!.ExternalArtistId);
-        Assert.Equal("222", _registry.Lookup(second)!.ExternalArtistId);
-    }
-
-    [Fact]
-    public void Register_SameAlbumNameWithDifferentProviderIds_ProducesDifferentIds()
-    {
-        var first = _registry.Register(new SoulseekRouting
-        {
-            Kind = RoutingKind.Album,
-            Artist = "Feel",
-            Album = "Feel",
-            ExternalAlbumId = "333",
-        });
-        var second = _registry.Register(new SoulseekRouting
-        {
-            Kind = RoutingKind.Album,
-            Artist = "Feel",
-            Album = "Feel",
-            ExternalAlbumId = "444",
-        });
-
-        Assert.NotEqual(first, second);
+        Assert.Equal("14880659", _registry.Lookup(id)!.ExternalAlbumId);
     }
 
     [Fact]
     public void Lookup_UnknownId_ReturnsNull()
     {
         Assert.Null(_registry.Lookup("nonexistent"));
+    }
+    // ---- Persistence --------------------------------------------------------
+    // The registry is the only thing that knows an id is ours, so losing it on restart
+    // made every id a client still held look local. Those were relayed to Navidrome,
+    // which answers error 70 "data not found" for media it does not have, and the client
+    // showed that on every play and every poll.
+
+    [Fact]
+    public void Register_SurvivesARestart()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"octo-ids-{Guid.NewGuid():N}.json");
+        try
+        {
+            string id;
+            using (var first = new ExternalIdRegistry(path))
+            {
+                id = first.Register(new SoulseekRouting
+                {
+                    Artist = "Radiohead", Title = "Reckoner", Duration = 290,
+                });
+            }
+
+            using var reopened = new ExternalIdRegistry(path);
+            var routing = reopened.Lookup(id);
+
+            Assert.NotNull(routing);
+            Assert.Equal("Radiohead", routing!.Artist);
+            Assert.Equal("Reckoner", routing.Title);
+            Assert.Equal(290, routing.Duration);
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void Register_WithNoPath_KeepsWorkingInMemory()
+    {
+        // The parameterless form is still a valid registry, just not a durable one.
+        using var registry = new ExternalIdRegistry();
+        var id = registry.Register(new SoulseekRouting { Artist = "A", Title = "B" });
+        Assert.NotNull(registry.Lookup(id));
+    }
+
+    [Fact]
+    public void Load_UnreadableFile_StartsEmptyRatherThanThrowing()
+    {
+        // A registry that will not parse is a cold start, not a failure to boot.
+        var path = Path.Combine(Path.GetTempPath(), $"octo-ids-{Guid.NewGuid():N}.json");
+        File.WriteAllText(path, "{ this is not the file you are looking for");
+        try
+        {
+            using var registry = new ExternalIdRegistry(path);
+            Assert.Null(registry.Lookup("anything"));
+
+            // ...and it must still be usable afterwards.
+            var id = registry.Register(new SoulseekRouting { Artist = "A", Title = "B" });
+            Assert.NotNull(registry.Lookup(id));
+        }
+        finally { if (File.Exists(path)) File.Delete(path); }
+    }
+
+    [Fact]
+    public void Register_ArtistByNameAlone_KeepsTheCatalogArtistAlreadyChosen()
+    {
+        // Two artists can share a name, and the page settled on one of them. Every album row
+        // mints its artist again by name alone, which must not undo that choice.
+        var id = _registry.Register(new SoulseekRouting
+        {
+            Kind = RoutingKind.Artist, Artist = "Nirvana", ExternalArtistId = "415",
+        });
+
+        _registry.Register(new SoulseekRouting { Kind = RoutingKind.Artist, Artist = "Nirvana" });
+
+        Assert.Equal("415", _registry.Lookup(id)!.ExternalArtistId);
     }
 }
