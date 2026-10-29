@@ -701,6 +701,15 @@ impl DeezerMetadataService {
                 return anyhow::Ok(Flow::Return(()));
             }
             hits = artist_hits(r.doc.as_ref())?;
+            // These rows already identify the artist by catalog id. A page and its related
+            // artists can reuse that exact answer, including after a supplemental search fails.
+            for hit in &hits {
+                self.put(
+                    format!("artist-id|{}", hit.deezer_id),
+                    Cached::ArtistHits(vec![hit.clone()]),
+                    POSITIVE_TTL,
+                );
+            }
             // Artist search can omit a namesake entirely. Songs expose that artist's real
             // catalog id, so exact-name song hits supplement, never replace, artist hits.
             let tracks = self

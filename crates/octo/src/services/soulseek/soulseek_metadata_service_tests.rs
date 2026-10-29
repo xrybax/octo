@@ -2180,3 +2180,29 @@ async fn namesakes_self_titled_albums_do_not_fold_into_one_or_share_an_id() {
     assert_eq!(h.lookup(&albums[0].id).external_album_id.as_deref(), Some("1001"));
     assert_eq!(h.lookup(&albums[1].id).external_album_id.as_deref(), Some("1002"));
 }
+
+#[tokio::test]
+async fn artist_page_reuses_its_catalog_identity_for_related_artists() {
+    let h = build_service(vec![
+        (
+            "/search/artist",
+            r#"{"data":[{"id":27,"name":"Justice","nb_fan":1000}]}"#,
+        ),
+        (
+            "/artist/27/related",
+            r#"{"data":[{"id":1,"name":"Daft Punk"},{"id":2,"name":"Kavinsky"}]}"#,
+        ),
+    ])
+    .await;
+    let id = outside_artist(&h, "Justice", None);
+    let artist = h.service.get_artist(PROVIDER, &id).await.unwrap();
+    let related = h.service.get_related_artists(PROVIDER, &id, 10).await;
+    assert_eq!(artist.name, "Justice");
+    assert_eq!(
+        related.iter().map(|a| a.name.as_str()).collect::<Vec<_>>(),
+        ["Daft Punk", "Kavinsky"]
+    );
+    assert_eq!(h.calls("/search/artist"), 1);
+    assert_eq!(h.calls("/artist/27/related"), 1);
+    assert_eq!(h.calls("/artist/27"), 1, "only the related-artists endpoint");
+}

@@ -156,7 +156,21 @@ fn assert_golden_with_explicit_status(reply: SubsonicReply, file: &str, name: &s
     assert_recorded(reply, recorded_with_explicit_status(file, name), file, name);
 }
 
-fn assert_recorded(reply: SubsonicReply, want: Recorded, file: &str, name: &str) {
+fn assert_recorded(reply: SubsonicReply, mut want: Recorded, file: &str, name: &str) {
+    let extension = if want.content_type.contains("json") {
+        "json"
+    } else {
+        "xml"
+    };
+    // Preserve the original C# recordings. The fork has explicit expectations only for
+    // responses whose unresolved artist links now use a song-anchored identity.
+    let fork = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+        "../../docs/rust-migration/fixtures/wire/fork/{file}-{name}.{extension}"
+    ));
+    if fork.is_file() {
+        want.body = std::fs::read_to_string(&fork).expect("the fork's expected response");
+        want.content_length = None;
+    }
     assert_eq!(reply.text(), want.body, "{file}/{name}: body");
     assert_eq!(
         reply.content_type, want.content_type,

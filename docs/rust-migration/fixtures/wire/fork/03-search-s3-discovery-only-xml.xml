@@ -1,0 +1,11 @@
+<subsonic-response status="ok" version="1.16.1" xmlns="http://subsonic.org/restapi">
+  <searchResult3>
+    <artist id="NdCCz1eNDVR3vKwUWVaAO1" name="Zephyr Echo" albumCount="2" coverArt="NdCCz1eNDVR3vKwUWVaAO1" isExternal="true" />
+    <album id="wIfqpf1IeFS337TdaMfNC3" parent="NdCCz1eNDVR3vKwUWVaAO1" isDir="true" title="Glass Harbor" name="Glass Harbor" album="Glass Harbor" artist="Zephyr Echo" artistId="NdCCz1eNDVR3vKwUWVaAO1" songCount="3" duration="0" genre="" coverArt="wIfqpf1IeFS337TdaMfNC3" created="2026-10-04T08:07:46.890Z" mediaType="album" displayArtist="Zephyr Echo" explicitStatus="" sortName="glass harbor" isExternal="true">
+      <releaseTypes>album</releaseTypes>
+    </album>
+    <song id="CwoXcVhGn95tWIOvqaFKt6" parent="wIfqpf1IeFS337TdaMfNC3" isDir="false" title="Glass Harbor" album="Glass Harbor" artist="Zephyr Echo" track="1" genre="" coverArt="CwoXcVhGn95tWIOvqaFKt6" contentType="audio/mp4" suffix="m4a" duration="241" bitRate="128" albumId="wIfqpf1IeFS337TdaMfNC3" artistId="15lrbRkYQzfJuRgM122K50" type="music" isVideo="false" mediaType="song" displayArtist="Zephyr Echo" displayAlbumArtist="Zephyr Echo" explicitStatus="" sortName="glass harbor" isExternal="true" year="2019" />
+    <song id="yy5PCYFGn1qhbOho4j6OF1" parent="wIfqpf1IeFS337TdaMfNC3" isDir="false" title="Neon Tide" album="Glass Harbor" artist="Zephyr Echo" track="1" genre="" coverArt="yy5PCYFGn1qhbOho4j6OF1" contentType="audio/mp4" suffix="m4a" duration="215" bitRate="128" albumId="wIfqpf1IeFS337TdaMfNC3" artistId="qh6LCNYO9cdcGL8l3j0wb4" type="music" isVideo="false" mediaType="song" displayArtist="Zephyr Echo" displayAlbumArtist="Zephyr Echo" explicitStatus="" sortName="neon tide" isExternal="true" year="2019" />
+    <song id="DUlkxONpTyX8xFkBJo1fi4" parent="wIfqpf1IeFS337TdaMfNC3" isDir="false" title="Paper Moons" album="Glass Harbor" artist="Zephyr Echo" track="1" genre="" coverArt="DUlkxONpTyX8xFkBJo1fi4" contentType="audio/mp4" suffix="m4a" duration="244" bitRate="128" albumId="wIfqpf1IeFS337TdaMfNC3" artistId="BSvaYJLtj0FBiYLK4yOBE3" type="music" isVideo="false" mediaType="song" displayArtist="Zephyr Echo" displayAlbumArtist="Zephyr Echo" explicitStatus="" sortName="paper moons" isExternal="true" year="2019" />
+  </searchResult3>
+</subsonic-response>

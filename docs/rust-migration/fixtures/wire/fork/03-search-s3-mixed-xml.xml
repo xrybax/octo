@@ -1,0 +1,34 @@
+<subsonic-response status="ok" version="1.16.1" xmlns="http://subsonic.org/restapi">
+  <searchResult3>
+    <artist id="2Rd8htgPSbDGv6lZq1D8WW" name="Aurora Vale" albumCount="1" sortName="aurora vale" isExternal="false">
+      <roles>artist</roles>
+      <roles>maincredit</roles>
+      <roles>albumartist</roles>
+    </artist>
+    <album id="5KkmjLAmQA5mvuA6BVtGuD" name="Northern Lights" artist="Aurora Vale" artistId="2Rd8htgPSbDGv6lZq1D8WW" coverArt="al-5KkmjLAmQA5mvuA6BVtGuD_b9d685baa046af1b" songCount="4" duration="11" created="2026-10-04T07:40:52.105627636Z" year="2020" genre="Electronic" sortName="northern lights" displayArtist="Aurora Vale" isExternal="false">
+      <genres name="Electronic"></genres>
+      <artists id="2Rd8htgPSbDGv6lZq1D8WW" name="Aurora Vale"></artists>
+    </album>
+    <song id="3cQUCXxV4YyCfbBaBp2UFT" parent="5KkmjLAmQA5mvuA6BVtGuD" isDir="false" title="Aurora (Live)" album="Northern Lights" artist="Aurora Vale" track="4" year="2020" genre="Electronic" coverArt="dc-5KkmjLAmQA5mvuA6BVtGuD:1" size="43518" contentType="audio/flac" suffix="flac" duration="4" bitRate="70" path="Aurora Vale/Northern Lights/01-04 - Aurora (Live).flac" discNumber="1" created="2026-10-04T08:07:33.853022565Z" albumId="5KkmjLAmQA5mvuA6BVtGuD" artistId="2Rd8htgPSbDGv6lZq1D8WW" type="music" sortName="aurora (live)" mediaType="song" channelCount="1" samplingRate="22050" bitDepth="16" displayArtist="Aurora Vale" displayAlbumArtist="Aurora Vale" isExternal="false">
+      <genres name="Electronic"></genres>
+      <artists id="2Rd8htgPSbDGv6lZq1D8WW" name="Aurora Vale"></artists>
+      <albumArtists id="2Rd8htgPSbDGv6lZq1D8WW" name="Aurora Vale"></albumArtists>
+    </song>
+    <song id="1REy4tCLzfZLRjFxpQBwVM" parent="5KkmjLAmQA5mvuA6BVtGuD" isDir="false" title="Midnight Sun" album="Northern Lights" artist="Aurora Vale" track="3" year="2020" genre="Electronic" coverArt="dc-5KkmjLAmQA5mvuA6BVtGuD:1" size="25481" contentType="audio/flac" suffix="flac" duration="2" bitRate="68" path="Aurora Vale/Northern Lights/01-03 - Midnight Sun.flac" discNumber="1" created="2026-10-04T08:07:33.857166766Z" albumId="5KkmjLAmQA5mvuA6BVtGuD" artistId="2Rd8htgPSbDGv6lZq1D8WW" type="music" sortName="midnight sun" mediaType="song" channelCount="1" samplingRate="22050" bitDepth="16" displayArtist="Aurora Vale" displayAlbumArtist="Aurora Vale" isExternal="false">
+      <genres name="Electronic"></genres>
+      <artists id="2Rd8htgPSbDGv6lZq1D8WW" name="Aurora Vale"></artists>
+      <albumArtists id="2Rd8htgPSbDGv6lZq1D8WW" name="Aurora Vale"></albumArtists>
+    </song>
+    <song id="6TOMTUtoEzhnB8tjXmNY5V" parent="5KkmjLAmQA5mvuA6BVtGuD" isDir="false" title="Polar Night" album="Northern Lights" artist="Aurora Vale" track="2" year="2020" genre="Electronic" coverArt="dc-5KkmjLAmQA5mvuA6BVtGuD:1" size="33513" contentType="audio/flac" suffix="flac" duration="3" bitRate="67" path="Aurora Vale/Northern Lights/01-02 - Polar Night.flac" discNumber="1" created="2026-10-04T08:07:33.85624551Z" albumId="5KkmjLAmQA5mvuA6BVtGuD" artistId="2Rd8htgPSbDGv6lZq1D8WW" type="music" sortName="polar night" mediaType="song" channelCount="1" samplingRate="22050" bitDepth="16" displayArtist="Aurora Vale" displayAlbumArtist="Aurora Vale" isExternal="false">
+      <genres name="Electronic"></genres>
+      <artists id="2Rd8htgPSbDGv6lZq1D8WW" name="Aurora Vale"></artists>
+      <albumArtists id="2Rd8htgPSbDGv6lZq1D8WW" name="Aurora Vale"></albumArtists>
+    </song>
+    <song id="2A1r2OKTiTVuvPfmtePIIe" parent="5KkmjLAmQA5mvuA6BVtGuD" isDir="false" title="Café del Mar" album="Northern Lights" artist="Aurora Vale" track="1" year="2020" genre="Electronic" coverArt="dc-5KkmjLAmQA5mvuA6BVtGuD:1" size="24984" contentType="audio/flac" suffix="flac" duration="2" bitRate="66" path="Aurora Vale/Northern Lights/01-01 - Café del Mar.flac" discNumber="1" created="2026-10-04T08:07:33.854286043Z" albumId="5KkmjLAmQA5mvuA6BVtGuD" artistId="2Rd8htgPSbDGv6lZq1D8WW" type="music" sortName="cafe del mar" mediaType="song" channelCount="1" samplingRate="22050" bitDepth="16" displayArtist="Aurora Vale" displayAlbumArtist="Aurora Vale" isExternal="false">
+      <genres name="Electronic"></genres>
+      <artists id="2Rd8htgPSbDGv6lZq1D8WW" name="Aurora Vale"></artists>
+      <albumArtists id="2Rd8htgPSbDGv6lZq1D8WW" name="Aurora Vale"></albumArtists>
+    </song>
+    <song id="rhcHCXhQyCj24j4PjWSZF4" parent="uqnZPEjsKEWJNll7U7pdI2" isDir="false" title="Borealis" album="Borealis" artist="Aurora Vale" track="1" genre="" coverArt="rhcHCXhQyCj24j4PjWSZF4" contentType="audio/mp4" suffix="m4a" bitRate="128" albumId="uqnZPEjsKEWJNll7U7pdI2" artistId="i8AhhzvGMW7JjQDUI3foE6" type="music" isVideo="false" mediaType="song" displayArtist="Aurora Vale" displayAlbumArtist="Aurora Vale" explicitStatus="" sortName="borealis" isExternal="true" />
+  </searchResult3>
+</subsonic-response>

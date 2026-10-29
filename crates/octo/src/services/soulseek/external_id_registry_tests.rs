@@ -356,8 +356,8 @@ fn a_looked_up_routing_changed_in_place_is_what_the_registry_holds() {
         Some("playing-now")
     );
 
-    // An artist page settles the catalog artist on the routing it looked up and registers that
-    // same object again (ReferenceEquals: nothing to merge).
+    // Resolving a legacy name-based artist creates its canonical catalog id; the old
+    // reference remains an alias to the same routing.
     let artist_id = registry.register(SoulseekRouting {
         kind: RoutingKind::Artist,
         artist: Some("Nirvana".into()),
@@ -365,8 +365,10 @@ fn a_looked_up_routing_changed_in_place_is_what_the_registry_holds() {
     });
     let artist = registry.lookup(&artist_id).expect("known");
     artist.lock().external_artist_id = Some("415".into());
-    assert_eq!(registry.register(artist.clone()), artist_id);
-    assert!(registry.lookup(&artist_id).expect("known").ptr_eq(&artist));
+    let canonical = registry.register(artist.clone());
+    assert_ne!(canonical, artist_id);
+    assert!(registry.lookup(&canonical).expect("canonical id").ptr_eq(&artist));
+    assert!(registry.lookup(&artist_id).expect("legacy alias").ptr_eq(&artist));
 }
 
 #[test]

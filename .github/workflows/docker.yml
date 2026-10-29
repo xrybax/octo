@@ -44,13 +44,16 @@ on:
 # cancel whatever is already pending when a newer run arrives, so tagging a release
 # would have silently dropped the queued build for the very commit being tagged.
 concurrency:
-  group: docker
+  # The fork's test branch publishes separate tags and uses separate build caches.
+  # Replace its superseded builds; keep the upstream release queue unchanged.
+  group: ${{ github.ref_name == 'feat/rust-m4a-artist-identity' && 'docker-fork-test' || 'docker' }}
   queue: max
-  cancel-in-progress: false
+  cancel-in-progress: ${{ github.ref_name == 'feat/rust-m4a-artist-identity' }}
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  CACHE_SUFFIX: ${{ github.ref_name == 'feat/rust-m4a-artist-identity' && '-fork-test' || '' }}
 
 jobs:
   # The release number is the VERSION file (the Rust build reads it; octo/octo.csproj names
@@ -268,8 +271,8 @@ jobs:
           outputs: type=image,name=${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}${{ matrix.image.suffix }},push-by-digest=true,name-canonical=true,push=true
           # A scope per image and platform, so the builds running side by side never fight
           # over the same cache entries.
-          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
-          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}
+          cache-from: type=gha,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}${{ env.CACHE_SUFFIX }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.image.name }}-${{ matrix.platform.arch }}${{ env.CACHE_SUFFIX }}
 
       - name: Keep the digest
         env:

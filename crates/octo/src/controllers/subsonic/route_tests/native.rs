@@ -56,6 +56,10 @@ impl Respond for FakeServers {
                 json(
                     r#"{"id":1,"title":"Test Album","release_date":"2001-01-01","artist":{"name":"Test Artist"}}"#,
                 )
+            } else if path == "/artist/7" {
+                json(
+                    r#"{"id":7,"name":"Test Artist","nb_album":3,"nb_fan":10,"picture_xl":"https://cdn/test-artist.jpg"}"#,
+                )
             } else if path.starts_with("/search/artist") {
                 // A bigger act whose name contains this one comes first, and a better known
                 // artist of the very same name before the one the library holds.
@@ -217,12 +221,8 @@ async fn native_artist_the_page_and_its_albums_at_once_ask_the_catalog_once() {
     assert_eq!(albums.status, StatusCode::OK);
 
     let calls = fixture.servers.deezer_calls.lock().clone();
-    // The search that names the artist, the listing, and each album's own record, once.
-    assert_eq!(
-        calls.iter().filter(|p| p.starts_with("/search/artist")).count(),
-        1,
-        "{calls:?}"
-    );
+    // The selected artist by id, the listing, and each album's own record, once.
+    assert_eq!(calls.iter().filter(|p| *p == "/artist/7").count(), 1, "{calls:?}");
     assert_eq!(
         calls.iter().filter(|p| *p == "/artist/7/albums").count(),
         1,
