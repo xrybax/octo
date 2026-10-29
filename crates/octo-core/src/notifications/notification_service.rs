@@ -398,7 +398,7 @@ mod tests {
             ..event(NotificationEventType::LosslessFallback)
         });
 
-        assert!(msg.body.contains("MP3"));
+        assert!(msg.body.contains("M4A"));
         assert!(msg.body.contains("No Soulseek FLAC found"));
     }
 

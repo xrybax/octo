@@ -607,7 +607,7 @@ fn persisted_artist_ids_from_before_catalog_scoping_still_open() {
         &path,
         serde_json::json!([{
             "Id": legacy_id,
-            "Routing": {"Kind":"Artist", "Artist":"Feel", "ExternalArtistId":"222"}
+            "Routing": {"Kind":2, "Artist":"Feel", "ExternalArtistId":"222"}
         }])
         .to_string(),
     )

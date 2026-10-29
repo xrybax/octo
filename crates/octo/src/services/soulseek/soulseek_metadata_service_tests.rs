@@ -685,11 +685,11 @@ async fn artist_page_opened_with_two_requests_at_once_walks_the_catalog_once() {
     let lists = [a, b, c];
 
     // One walk: the name search, the artist's listing, and the own records of the first
-    // 20 albums without a count. 22 calls, where each request used to make its own.
+    // 20 albums without a count, plus the supplemental song search: 23 calls.
     assert_eq!(h.calls("/search/artist"), 1);
     assert_eq!(h.calls("/artist/222/albums"), 1);
     assert_eq!(h.calls("/album/1"), 20);
-    assert_eq!(h.catalog.calls.lock().len(), 22);
+    assert_eq!(h.catalog.calls.lock().len(), 23);
     assert!(lists.iter().all(|list| list.len() == 30));
     // Both page lists show the counts that came back.
     assert_eq!(lists[1].iter().filter(|a| a.song_count == Some(10)).count(), 20);
@@ -2161,4 +2161,22 @@ async fn album_tracks_keep_each_catalog_artist_including_guests() {
     assert_eq!(h.lookup(guest_id).external_artist_id.as_deref(), Some("333"));
     let reloaded = h.service.get_song(PROVIDER, &album.songs[1].id).await.unwrap();
     assert_eq!(reloaded.artist_id, album.songs[1].artist_id);
+}
+
+#[tokio::test]
+async fn namesakes_self_titled_albums_do_not_fold_into_one_or_share_an_id() {
+    let h = build_service(vec![(
+        "/search/album",
+        r#"{"data":[
+        {"id":1001,"title":"Feel","record_type":"album","nb_tracks":10,"artist":{"id":222,"name":"Feel"}},
+        {"id":1002,"title":"Feel","record_type":"album","nb_tracks":12,"artist":{"id":111,"name":"Feel"}}
+    ]}"#,
+    )])
+    .await;
+    let albums = h.service.search_album_rows("Feel", 20).await;
+    assert_eq!(albums.len(), 2);
+    assert_ne!(albums[0].id, albums[1].id);
+    assert_ne!(albums[0].artist_id, albums[1].artist_id);
+    assert_eq!(h.lookup(&albums[0].id).external_album_id.as_deref(), Some("1001"));
+    assert_eq!(h.lookup(&albums[1].id).external_album_id.as_deref(), Some("1002"));
 }
