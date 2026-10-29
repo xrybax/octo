@@ -45,10 +45,10 @@ on:
 # would have silently dropped the queued build for the very commit being tagged.
 concurrency:
   # The fork's test branch publishes separate tags and uses separate build caches.
-  # Replace its superseded builds; keep the upstream release queue unchanged.
+  # Queue its builds separately; keep the upstream release queue unchanged.
   group: ${{ github.ref_name == 'feat/rust-m4a-artist-identity' && 'docker-fork-test' || 'docker' }}
   queue: max
-  cancel-in-progress: ${{ github.ref_name == 'feat/rust-m4a-artist-identity' }}
+  cancel-in-progress: false
 
 env:
   REGISTRY: ghcr.io
