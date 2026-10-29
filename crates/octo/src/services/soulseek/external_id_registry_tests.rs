@@ -271,13 +271,30 @@ fn the_fixture_round_trips_byte_for_byte() {
 }
 
 #[test]
-fn the_fixture_ids_are_the_ones_this_registry_mints() {
-    // The fixture is a real registry file, so its ids are genuine.
+fn legacy_fixture_ids_still_open_while_new_artists_are_catalog_scoped() {
+    let (_dir, path) = temp_path("legacy-external-ids.json");
     let text = std::fs::read_to_string(FIXTURE).expect("the fixture is in the repo");
+    std::fs::write(&path, &text).expect("writes");
+    let registry = ExternalIdRegistry::new(Some(&path));
     let entries: Vec<Persisted> = serde_json::from_str(&text).expect("the fixture reads");
     for e in entries {
         let routing = e.routing.expect("a routing");
-        assert_eq!(ExternalIdRegistry::make_short_id(&routing), e.id, "{routing:?}");
+        assert_eq!(
+            registry.lookup(&e.id).expect("legacy id opens").snapshot(),
+            routing
+        );
+        let canonical = ExternalIdRegistry::make_short_id(&routing);
+        if routing.kind == RoutingKind::Artist && routing.external_artist_id.is_some() {
+            // The old name-based id remains usable, while new rows distinguish namesakes.
+            assert_ne!(canonical, e.id);
+            assert_eq!(registry.register(routing.clone()), canonical);
+            assert_eq!(
+                registry.lookup(&e.id).expect("legacy alias remains").snapshot(),
+                routing
+            );
+        } else {
+            assert_eq!(canonical, e.id, "{routing:?}");
+        }
     }
 }
 
